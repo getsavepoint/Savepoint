@@ -24,5 +24,21 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # Local S3-compatible sandbox (real MinIO server) for the Savepoint S3 connector.
+  # Console: http://localhost:9001. NOTE: upstream minio/minio is no longer published
+  # on Docker Hub or Quay, so this uses the frozen bitnamilegacy mirror of MinIO.
+  minio:
+    image: bitnamilegacy/minio:latest
+    container_name: savepoint-minio
+    environment:
+      MINIO_ROOT_USER: savepoint_minio
+      MINIO_ROOT_PASSWORD: savepoint_minio_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/bitnami/minio/data
+
 volumes:
   pgdata:
+  miniodata:

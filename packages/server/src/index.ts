@@ -16,3 +16,7 @@ export { refundRequestSchema, type RefundRequest, type RefundResult } from './en
 export { emailRequestSchema, type EmailRequest, type AirlockRow } from './engine/airlock.js';
 export { type RevertReport, type RevertStep } from './engine/revert.js';
 export { createMcpServer } from './mcp/server.js';
+export { s3PutRequestSchema, s3DeleteRequestSchema, s3AclRequestSchema, S3Proxy, type S3Result, type S3PutRequest, type S3DeleteRequest, type S3AclRequest } from './engine/s3.js';
+export { githubUpdateRequestSchema, githubDeleteBranchesSchema, GitHubProxy, type GitHubResult } from './engine/github.js';
+export { createGitHubSandbox, ensureGitHubSandbox, seedGitHubSandbox } from './engine/github-sandbox.js';
+export { slackPostSchema, slackArchiveSchema, SlackProxy, type SlackResult, type SlackQueueRow } from './engine/slack.js';

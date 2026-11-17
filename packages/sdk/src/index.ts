@@ -6,6 +6,16 @@ import { StdioClientTransport, type StdioServerParameters } from '@modelcontextp
 // Wire types (mirrors @savepoint/server; kept dependency-free on purpose)
 // ---------------------------------------------------------------------------
 
+export type ActionType =
+  | 'pg.update' | 'pg.delete' | 'stripe.refund'
+  | 's3.put' | 's3.delete' | 's3.acl'
+  | 'github.issue_update' | 'github.pr_update' | 'github.branch_delete'
+  | 'slack.post' | 'slack.archive';
+
+/** The five core connectors Savepoint wraps. */
+export const CONNECTORS = ['postgres', 'stripe', 's3', 'github', 'slack'] as const;
+export type Connector = (typeof CONNECTORS)[number];
+
 export type Scalar = string | number | boolean | null;
 export type FilterOp = 'eq' | 'neq' | 'lt' | 'lte' | 'gt' | 'gte' | 'in' | 'not_in' | 'like' | 'ilike' | 'is_null' | 'not_null';
 export type Where = Record<string, Scalar | { op: FilterOp; value?: Scalar | Scalar[] }>;
@@ -49,10 +59,11 @@ export interface RevertReport {
   runId: string;
   complete: boolean;
   emails: { cancelled: string[]; alreadySent: string[] };
+  slack: RevertSlackReport;
   steps: {
     seq: number;
     snapshotId: string;
-    actionType: 'pg.update' | 'pg.delete' | 'stripe.refund';
+    actionType: ActionType;
     target: string;
     status: 'reverted' | 'revert_failed';
     compensation?: Record<string, unknown>;
@@ -60,10 +71,13 @@ export interface RevertReport {
   }[];
   remaining: number[];
 }
+export interface RevertSlackReport { cancelled: string[]; alreadySent: string[] }
+
 export interface RunInfo {
   runId: string;
   snapshots: Record<string, unknown>[];
   emails: Record<string, unknown>[];
+  slack: Record<string, unknown>[];
 }
 
 export interface RefundInput {
@@ -79,6 +93,31 @@ export interface EmailInput {
   html?: string;
   from?: string;
 }
+
+export interface S3PutInput {
+  key: string;
+  body: string;
+  encoding?: 'utf8' | 'base64';
+  bucket?: string;
+  contentType?: string;
+  metadata?: Record<string, string>;
+}
+export type S3DeleteInput = { bucket?: string } & ({ keys: string[]; prefix?: never } | { prefix: string; keys?: never });
+export interface S3Result {
+  status: 'applied';
+  runId: string; seq: number; snapshotId: string;
+  bucket: string; objects: number; keys: string[]; etag?: string; amountCents: 0;
+}
+export interface GitHubTarget { owner?: string; repo?: string }
+export interface GitHubPatch { title?: string; body?: string | null; state?: 'open' | 'closed'; labels?: string[]; base?: string }
+export interface GitHubResult {
+  status: 'applied';
+  runId: string; seq: number; snapshotId: string; repo: string; items: number; numbers?: number[]; branches?: string[]; amountCents: 0;
+}
+export interface SlackPostInput { channel: string; text: string; threadTs?: string }
+export type SlackResult =
+  | { status: 'held'; runId: string; seq: number; snapshotId: string; id: string; channel: string; releaseAt: string; reasons: string[]; amountCents: 0 }
+  | { status: 'applied'; runId: string; seq: number; snapshotId: string; channel: string; ts: string; backend: 'sink' | 'bot' | 'webhook'; amountCents: 0 };
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -173,6 +212,53 @@ export class SavepointRun {
 
   sendEmail(input: EmailInput) {
     return this.sp.call<HeldEmail>('savepoint_send_email', { runId: this.runId, ...input });
+  }
+
+  // ---- AWS S3 ----
+  s3PutObject(input: S3PutInput) {
+    return this.sp.call<S3Result | BlockedAction>('savepoint_s3_put_object', { runId: this.runId, ...input });
+  }
+  s3DeleteObjects(input: S3DeleteInput) {
+    return this.sp.call<S3Result | BlockedAction>('savepoint_s3_delete_objects', { runId: this.runId, ...input });
+  }
+  s3SetBucketAcl(acl: 'private' | 'public-read' | 'public-read-write' | 'authenticated-read', bucket?: string) {
+    return this.sp.call<S3Result | BlockedAction>('savepoint_s3_set_bucket_acl', { runId: this.runId, acl, ...(bucket ? { bucket } : {}) });
+  }
+
+  // ---- GitHub ----
+  githubUpdateIssues(numbers: number[], patch: GitHubPatch, target: GitHubTarget = {}) {
+    return this.sp.call<GitHubResult | BlockedAction>('savepoint_github_update_issues', { runId: this.runId, numbers, patch, ...target });
+  }
+  githubUpdatePulls(numbers: number[], patch: GitHubPatch, target: GitHubTarget = {}) {
+    return this.sp.call<GitHubResult | BlockedAction>('savepoint_github_update_pulls', { runId: this.runId, numbers, patch, ...target });
+  }
+  githubDeleteBranches(branches: string[], target: GitHubTarget = {}) {
+    return this.sp.call<GitHubResult | BlockedAction>('savepoint_github_delete_branches', { runId: this.runId, branches, ...target });
+  }
+
+  // ---- Slack ----
+  slackPost(input: SlackPostInput) {
+    return this.sp.call<SlackResult | BlockedAction>('savepoint_slack_post', { runId: this.runId, ...input });
+  }
+  slackArchiveChannel(channel: string) {
+    return this.sp.call<BlockedAction>('savepoint_slack_archive_channel', { runId: this.runId, channel });
+  }
+
+  /** The five connectors grouped by system, e.g. `run.s3.put(...)`, `run.github.deleteBranches(...)`. */
+  get postgres() {
+    return { update: this.updateRows.bind(this), delete: this.deleteRows.bind(this) };
+  }
+  get stripe() {
+    return { refund: this.refund.bind(this) };
+  }
+  get s3() {
+    return { put: this.s3PutObject.bind(this), delete: this.s3DeleteObjects.bind(this), setBucketAcl: this.s3SetBucketAcl.bind(this) };
+  }
+  get github() {
+    return { updateIssues: this.githubUpdateIssues.bind(this), updatePulls: this.githubUpdatePulls.bind(this), deleteBranches: this.githubDeleteBranches.bind(this) };
+  }
+  get slack() {
+    return { post: this.slackPost.bind(this), archiveChannel: this.slackArchiveChannel.bind(this), email: this.sendEmail.bind(this) };
   }
 
   revert() {

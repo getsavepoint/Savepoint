@@ -15,6 +15,8 @@ export interface ShadowStep {
   rows?: { id: unknown; before: Row | null; after: Row | null; changed: Record<string, [unknown, unknown]> }[];
   /** For updates: whether the shadow result equals the after_state the live run recorded. */
   matchesLiveAfterState?: boolean;
+  /** Human-readable simulated effects for S3 / GitHub / Slack steps. */
+  lines?: string[];
   stripe?: { chargeId: string; refundedBeforeCents: number; refundedAfterCents: number; amountCents: number };
   error?: string;
 }
@@ -26,6 +28,9 @@ export interface ShadowReport {
     mode: 'temp-tables-in-rolled-back-transaction';
     liveRowsTouched: 0;
     stripeApiCalls: 0;
+    s3Writes: 0;
+    githubApiCalls: 0;
+    slackPosts: 0;
     emailsSent: 0;
     liveFingerprintBefore: string;
     liveFingerprintAfter: string;
@@ -38,6 +43,46 @@ export interface ShadowReport {
 }
 
 const MAX_ROWS_SHOWN = 20;
+
+type Anyobj = Record<string, any>;
+/** Simulated (never executed) effect of a non-Postgres, non-Stripe step, derived purely from the saved snapshot. */
+function simulateConnector(s: SnapshotRow, phase: 'forward' | 'revert'): { lines: string[]; rows?: ShadowStep['rows'] } {
+  const before = (s.before_state ?? {}) as Anyobj;
+  const req = (s.request ?? {}) as Anyobj;
+  const fwd = phase === 'forward';
+  if (s.action_type === 's3.put' || s.action_type === 's3.delete') {
+    const lines = ((before.objects ?? []) as Anyobj[]).map((o) => {
+      const size = o.head?.contentLength;
+      if (s.action_type === 's3.delete') return fwd ? `delete s3://${before.bucket}/${o.key} (${size ?? '?'} B vaulted)` : `restore s3://${before.bucket}/${o.key} from vault (${size ?? '?'} B, etag ${String(o.head?.etag ?? '').slice(0, 8)})`;
+      return o.existed
+        ? (fwd ? `overwrite s3://${before.bucket}/${o.key} (prior ${size} B + metadata vaulted)` : `restore prior ${size} B + metadata of ${o.key} from vault`)
+        : (fwd ? `create s3://${before.bucket}/${o.key}` : `remove newly created ${o.key}`);
+    });
+    return { lines: lines.length ? lines : ['no objects'] };
+  }
+  if (s.action_type === 's3.acl') return { lines: [fwd ? `set bucket ACL to ${req.acl}` : 'nothing to undo'] };
+  if (s.action_type === 'github.branch_delete') {
+    return { lines: ((before.branches ?? []) as Anyobj[]).map((b) => fwd ? `delete branch ${b.name} (head ${String(b.sha).slice(0, 7)} saved)` : `recreate branch ${b.name} at ${String(b.sha).slice(0, 7)}`) };
+  }
+  if (s.action_type === 'github.issue_update' || s.action_type === 'github.pr_update') {
+    const patch = (req.patch ?? {}) as Anyobj;
+    const items = (before.items ?? []) as Anyobj[];
+    const rows = items.slice(0, MAX_ROWS_SHOWN).map((it) => {
+      const after = fwd ? { ...it, ...patch } : it;
+      const from = fwd ? it : { ...it, ...patch };
+      return { id: it.number, before: from, after, changed: diffRow(from, after) };
+    });
+    return { lines: [`${fwd ? 'apply patch to' : 'restore'} ${items.length} ${before.kind === 'pull' ? 'pull request(s)' : 'issue(s)'} in ${before.repo}`], rows };
+  }
+  if (s.action_type === 'slack.post') {
+    const after = (s.after_state ?? {}) as Anyobj;
+    return { lines: [fwd
+      ? (after.mode === 'airlock' ? `post to #${req.channel} would be HELD in the 60s airlock (${(after.reasons ?? []).join('; ')})` : `post to #${req.channel} would be delivered immediately`)
+      : (after.mode === 'airlock' ? 'cancel the held message before delivery' : 'delete the posted message')] };
+  }
+  return { lines: ['no simulation available'] };
+}
+
 const stable = (v: unknown) => JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
 
 function diffRow(before: Row | null, after: Row | null): Record<string, [unknown, unknown]> {
@@ -77,7 +122,7 @@ export async function shadowReplay(pool: pg.Pool, runId: string): Promise<Shadow
   if (snaps.length === 0) throw new SavepointError('run_not_found', `No ledger entries for run "${runId}"`);
 
   const catalog = new TableCatalog(pool, config.protectedTablePrefixes);
-  const pgSnaps = snaps.filter((s) => s.action_type !== 'stripe.refund' && s.status !== 'blocked' && Array.isArray(s.before_state));
+  const pgSnaps = snaps.filter((s) => s.action_type.startsWith('pg.') && s.status !== 'blocked' && Array.isArray(s.before_state));
   const idsByTable = new Map<string, unknown[]>();
   for (const s of pgSnaps) {
     const ids = idsByTable.get(s.target) ?? [];
@@ -132,6 +177,11 @@ export async function shadowReplay(pool: pg.Pool, runId: string): Promise<Shadow
       const base = { seq: s.seq, actionType: s.action_type, target: s.target };
       if (s.status === 'blocked') {
         forward.push({ ...base, outcome: 'skipped_blocked', note: `Gate blocked this in the live run: ${s.block_reason ?? 'blast radius exceeded'}. Nothing executed, nothing to replay.` });
+        continue;
+      }
+      if (/^(s3|github|slack)\./.test(s.action_type)) {
+        const sim = simulateConnector(s, 'forward');
+        forward.push({ ...base, outcome: 'simulated', note: 'Simulated from the saved snapshot. No call was made to S3, GitHub or Slack.', lines: sim.lines, ...(sim.rows ? { rows: sim.rows } : {}) });
         continue;
       }
       if (s.action_type === 'stripe.refund') {
@@ -197,6 +247,11 @@ export async function shadowReplay(pool: pg.Pool, runId: string): Promise<Shadow
     for (const s of [...snaps].reverse()) {
       const base = { seq: s.seq, actionType: s.action_type, target: s.target };
       if (s.status === 'blocked') continue;
+      if (/^(s3|github|slack)\./.test(s.action_type)) {
+        const sim = simulateConnector(s, 'revert');
+        revert.push({ ...base, outcome: 'simulated', lines: sim.lines });
+        continue;
+      }
       if (s.action_type === 'stripe.refund') {
         const amount = Number(s.amount_cents ?? 0);
         const charge = (s.before_state as { charge?: { id: string; amount_refunded: number } } | null)?.charge;
@@ -248,6 +303,9 @@ export async function shadowReplay(pool: pg.Pool, runId: string): Promise<Shadow
       mode: 'temp-tables-in-rolled-back-transaction',
       liveRowsTouched: 0,
       stripeApiCalls: 0,
+      s3Writes: 0,
+      githubApiCalls: 0,
+      slackPosts: 0,
       emailsSent: 0,
       liveFingerprintBefore: fpBefore,
       liveFingerprintAfter: fpAfter,

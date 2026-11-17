@@ -4,6 +4,7 @@ import { createDashboard } from './server.js';
 const port = Number(process.env.DASHBOARD_PORT ?? 3000);
 const sp = createSavepoint({ log: (m) => console.log(`[savepoint] ${m}`) });
 // The dashboard owns an airlock worker so held mail is delivered on schedule.
+await sp.init(); // MinIO buckets + offline GitHub sandbox
 const worker = sp.config.airlock.runWorker ? sp.startAirlockWorker() : null;
 const { server, drills } = createDashboard({ sp, port });
 

@@ -4,8 +4,9 @@ import { dirname, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import type { Savepoint } from '../engine/index.js';
+import { runFiveToolDrill } from '../drill/five-tool.js';
 
-export type DrillMode = 'gemini' | 'scripted';
+export type DrillMode = 'gemini' | 'scripted' | '5tool';
 export type DrillStatus = 'starting' | 'running' | 'crashed' | 'reverting' | 'done' | 'error';
 
 export interface DrillEvent {
@@ -55,6 +56,7 @@ export class DrillManager {
   start(mode: DrillMode): Drill {
     if (this.active) throw new Error('A chaos drill is already running');
     if (!this.sp.infra.stripe) throw new Error('STRIPE_SECRET_KEY (test key) is required for the drill');
+    if (mode === '5tool' && (this.sp.github.live || this.sp.slack.backend !== 'sink')) throw new Error('The 5-tool drill only runs on local sandboxes: unset GITHUB_TOKEN / SLACK_BOT_TOKEN / SLACK_WEBHOOK_URL');
     if (mode === 'gemini' && !process.env.LLM_API_KEY) throw new Error('LLM_API_KEY is not set; use the scripted agent mode');
     const drill: Drill = {
       id: `drill_${Date.now()}`,
@@ -68,7 +70,7 @@ export class DrillManager {
     };
     this.drills.set(drill.id, drill);
     for (const k of [...this.drills.keys()].slice(0, -10)) this.drills.delete(k);
-    const run = mode === 'gemini' ? this.runGemini(drill) : this.runScripted(drill);
+    const run = mode === 'gemini' ? this.runGemini(drill) : mode === '5tool' ? this.runFiveTool(drill) : this.runScripted(drill);
     run.catch((err) => this.fail(drill, err));
     return drill;
   }
@@ -146,6 +148,21 @@ export class DrillManager {
     if (/^[═=]{4,}/.test(line)) { this.log(d, 'info', line.replace(/[═]+/g, '').trim()); return; }
     const level = /✓ PASS|PASSED/.test(line) ? 'ok' : /✗ FAIL|FAILED|✖/.test(line) ? 'error' : /^\s*\(gemini/.test(line) ? 'warn' : 'info';
     this.log(d, level, line);
+  }
+
+  // ---- 5-tool drill: Postgres + Stripe + S3 + GitHub + Slack/Email, crash on step 6 -------------
+  private async runFiveTool(d: Drill) {
+    d.status = 'running';
+    const r = await runFiveToolDrill(this.sp, {
+      paceMs: PACE_MS,
+      pauseBeforeRevertMs: CRASH_TO_REVERT_MS,
+      log: (level, msg) => this.log(d, level, msg),
+      onRun: (runId) => this.setRun(d, runId),
+      onCrash: () => { d.crashed = true; d.status = 'crashed'; },
+      onReverting: () => { d.status = 'reverting'; },
+    });
+    d.status = r.passed ? 'done' : 'error';
+    d.finishedAt = new Date().toISOString();
   }
 
   // ---- deterministic stand-in: same 4 steps, no LLM dependency -------------------------------------

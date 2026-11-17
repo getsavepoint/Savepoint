@@ -6,6 +6,8 @@ import type { Savepoint } from '../engine/index.js';
 import { RUN_ID_PATTERN, SavepointError, type SnapshotRow } from '../engine/ledger.js';
 import type { AirlockRow } from '../engine/airlock.js';
 import { DrillManager, type DrillMode } from './drill.js';
+import { ListObjectsV2Command, HeadBucketCommand } from '@aws-sdk/client-s3';
+import type { SlackQueueRow } from '../engine/slack.js';
 import { shadowReplay } from './shadow.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,7 +93,10 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
                count(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
                min(created_at) AS started_at,
                max(GREATEST(created_at, cancelled_at, released_at)) AS last_at
-          FROM savepoint_airlock_queue GROUP BY run_id)
+          FROM (SELECT run_id, status, created_at, cancelled_at, released_at FROM savepoint_airlock_queue
+                UNION ALL
+                SELECT run_id, status, created_at, cancelled_at, released_at FROM savepoint_slack_queue) q
+         GROUP BY run_id)
       SELECT COALESCE(s.run_id, a.run_id) AS run_id,
              COALESCE(s.steps, 0) AS steps, COALESCE(s.applied, 0) AS applied, COALESCE(s.blocked, 0) AS blocked,
              COALESCE(s.reverted, 0) AS reverted, COALESCE(s.failed, 0) AS failed, COALESCE(s.pending, 0) AS pending,
@@ -110,16 +115,20 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
     });
   }
 
+  const kindOf = (a: string) => (a.startsWith('stripe') ? 'stripe' : a.startsWith('s3.') ? 's3' : a.startsWith('github.') ? 'github' : a.startsWith('slack.') ? 'slack' : 'postgres');
+  const queueView = (q?: SlackQueueRow) => q ? { id: q.id, status: q.status, reason: q.reason, releaseAt: q.release_at, releasedAt: q.released_at, cancelledAt: q.cancelled_at } : null;
   const gateOf = (s: SnapshotRow) => (s.status === 'blocked' ? 'blocked' : 'approved');
 
   async function runDetail(runId: string) {
     const { rows: snaps } = await pool.query<SnapshotRow>('SELECT * FROM savepoint_snapshots WHERE run_id = $1 ORDER BY seq', [runId]);
     const { rows: emails } = await pool.query<AirlockRow>('SELECT * FROM savepoint_airlock_queue WHERE run_id = $1 ORDER BY created_at', [runId]);
-    if (snaps.length === 0 && emails.length === 0) throw new HttpError(404, `Run "${runId}" not found`);
+    const slackQueue = await sp.slack.listRun(runId);
+    const slackById = new Map(slackQueue.map((q) => [q.id, q]));
+    if (snaps.length === 0 && emails.length === 0 && slackQueue.length === 0) throw new HttpError(404, `Run "${runId}" not found`);
     const drill = drills.byRun.get(runId);
     const steps = [
       ...snaps.map((s) => ({
-        kind: s.action_type === 'stripe.refund' ? 'stripe' : 'postgres',
+        kind: kindOf(s.action_type),
         id: s.id,
         seq: s.seq,
         at: s.created_at,
@@ -136,6 +145,7 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
         compensation: s.compensation,
         error: s.error,
         revertedAt: s.reverted_at,
+        ...(s.action_type === 'slack.post' ? { queue: queueView(slackById.get((s.after_state as { queueId?: string } | null)?.queueId ?? '')) } : {}),
       })),
       ...emails.map((e) => ({
         kind: 'email',
@@ -160,7 +170,7 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
       reverted: snaps.filter((s) => s.status === 'reverted').length,
       failed: snaps.filter((s) => s.status === 'failed' || s.status === 'revert_failed').length,
       pending: snaps.filter((s) => s.status === 'pending').length,
-      held: emails.filter((e) => e.status === 'held').length,
+      held: emails.filter((e) => e.status === 'held').length + slackQueue.filter((q) => q.status === 'held').length,
     };
     const crashedUnreverted = Boolean(drill?.crashed) && counts.reverted === 0 && counts.applied > 0;
     return {
@@ -179,10 +189,21 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
         WHERE status IN ('held', 'releasing') OR created_at > now() - interval '30 minutes'
         ORDER BY (status = 'held') DESC, release_at ASC LIMIT 40`,
     );
+    const { rows: slackRows } = await pool.query<SlackQueueRow>(
+      `SELECT * FROM savepoint_slack_queue
+        WHERE status IN ('held', 'releasing') OR created_at > now() - interval '30 minutes'
+        ORDER BY (status = 'held') DESC, release_at ASC LIMIT 40`,
+    );
+    const slackItems = slackRows.map((q) => ({
+      id: q.id, runId: q.run_id, channel: 'slack', status: q.status, from: 'savepoint-bot', to: [`#${q.channel}`],
+      subject: q.text, body: `Why airlocked: ${q.reason}`, createdAt: q.created_at, releaseAt: q.release_at,
+      releasedAt: q.released_at, cancelledAt: q.cancelled_at, error: q.error,
+    }));
     return {
       now: new Date().toISOString(),
       holdSeconds: sp.config.airlock.holdSeconds,
-      emails: rows.map((e) => ({
+      emails: [...rows.map((e) => ({
+        channel: 'email',
         id: e.id,
         runId: e.run_id,
         status: e.status,
@@ -195,7 +216,22 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
         releasedAt: e.released_at,
         cancelledAt: e.cancelled_at,
         error: e.error,
-      })),
+      })), ...slackItems].sort((a, b) => (a.status === 'held' ? 0 : 1) - (b.status === 'held' ? 0 : 1) || +new Date(a.releaseAt) - +new Date(b.releaseAt)),
+    };
+  }
+
+  async function sandboxView() {
+    const bucket = sp.config.s3.defaultBucket;
+    const objects = await sp.infra.s3
+      .send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 200 }))
+      .then((r) => (r.Contents ?? []).sort((a, b) => +(b.LastModified ?? 0) - +(a.LastModified ?? 0)).slice(0, 12).map((o) => ({ key: o.Key, size: o.Size, modified: o.LastModified })))
+      .catch(() => []);
+    const { rows: branches } = await pool.query(`SELECT name, sha, protected FROM sandbox_gh_branches WHERE repo = $1 ORDER BY name`, [sp.config.github.defaultRepo]).catch(() => ({ rows: [] }));
+    const { rows: items } = await pool.query(`SELECT number, kind, title, state FROM sandbox_gh_items WHERE repo = $1 AND (state = 'closed' OR title LIKE 'CHAOS%') ORDER BY updated_at DESC LIMIT 8`, [sp.config.github.defaultRepo]).catch(() => ({ rows: [] }));
+    return {
+      s3: { bucket, objects },
+      github: { repo: sp.config.github.defaultRepo, live: sp.github.live, branches, changedItems: items },
+      slack: { backend: sp.slack.backend, inbox: await sp.slack.listSink(15) },
     };
   }
 
@@ -208,7 +244,7 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
         return { ok: false, detail: (e as Error).message };
       }
     };
-    const [postgres, redis, mailpit, stripe] = await Promise.all([
+    const [postgres, redis, mailpit, stripe, minio] = await Promise.all([
       timed(() => pool.query('SELECT 1')),
       timed(() => sp.infra.redis.ping()),
       timed(async () => {
@@ -216,15 +252,18 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
       }),
       sp.infra.stripe ? timed(() => sp.infra.stripe!.balance.retrieve()) : Promise.resolve({ ok: false, detail: 'STRIPE_SECRET_KEY not set' }),
+      timed(() => sp.infra.s3.send(new HeadBucketCommand({ Bucket: sp.config.s3.defaultBucket }))),
     ]);
     return {
-      postgres, redis, mailpit, stripe,
+      postgres, redis, mailpit, stripe, minio,
+      github: { mode: sp.github.live ? 'live' : 'sandbox' }, slack: { backend: sp.slack.backend },
       mailpitUrl: `http://localhost:8025`,
       stripeMode: sp.infra.stripe ? 'test' : null,
       holdSeconds: sp.config.airlock.holdSeconds,
       gate: sp.config.gate,
       geminiAvailable: drills.geminiAvailable(),
       scriptedAvailable: Boolean(sp.infra.stripe),
+      fiveToolAvailable: Boolean(sp.infra.stripe) && !sp.github.live && sp.slack.backend === 'sink',
     };
   }
 
@@ -249,6 +288,7 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
     }
     if (method === 'GET' && path === '/api/health') return json(res, 200, await health());
     if (method === 'GET' && path === '/api/runs') return json(res, 200, { now: new Date().toISOString(), runs: await listRuns() });
+    if (method === 'GET' && path === '/api/sandbox') return json(res, 200, await sandboxView());
     if (method === 'GET' && path === '/api/airlock') return json(res, 200, await airlockView());
     if (method === 'GET' && path === '/api/drill') {
       const d = drills.latest;
@@ -269,7 +309,8 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
     if (method === 'POST' && (m = /^\/api\/airlock\/([^/]+)\/release$/.exec(path))) {
       const id = m[1]!;
       if (!UUID.test(id)) throw new HttpError(400, 'Invalid email id');
-      const result = await sp.airlock.releaseNow(id);
+      let result = await sp.airlock.releaseNow(id);
+      if (result === 'not_held') result = await sp.slack.releaseNow(id);
       if (result === 'not_held') throw new HttpError(409, 'Email is no longer held (already released, cancelled or reverted)', 'not_held');
       if (result === 'send_failed') throw new HttpError(502, 'SMTP send failed; message returned to the airlock queue', 'send_failed');
       return json(res, 200, { status: 'released', id });
@@ -277,7 +318,7 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
     if (method === 'POST' && path === '/api/drill/stop') return json(res, 200, { stopped: drills.stop() });
     if (method === 'POST' && path === '/api/drill') {
       const body = await readBody(req);
-      const mode: DrillMode = body.mode === 'scripted' ? 'scripted' : 'gemini';
+      const mode: DrillMode = body.mode === '5tool' ? '5tool' : body.mode === 'scripted' ? 'scripted' : 'gemini';
       try {
         const d = drills.start(mode);
         return json(res, 202, { drill: d });

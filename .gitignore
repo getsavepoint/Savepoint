@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 *.log
+
+# local sandbox runtime data (MinIO normally lives in the Docker volume "miniodata")
+.minio/
+minio-data/
+.savepoint/
+*.tsbuildinfo
+coverage/

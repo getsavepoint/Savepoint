@@ -79,6 +79,7 @@ a{color:var(--accent)}
   <label class="kv" for="mode">Agent</label>
   <select id="mode"><option value="gemini">Gemini agent (live LLM)</option><option value="scripted">Scripted agent (no LLM)</option></select>
   <button class="primary" id="drillBtn">▶ Run Chaos Drill</button>
+  <button class="primary" id="fiveBtn" title="Postgres + Stripe + S3 + GitHub + Slack/Email, crash on step 6, LIFO revert of all 5">▶ Run 5-Tool Chaos Drill</button>
 </header>
 
 <main>
@@ -97,6 +98,10 @@ a{color:var(--accent)}
     <section class="card">
       <div class="hd"><h2>60-second staging airlock</h2><span class="spacer"></span><span class="kv" id="airMeta"></span></div>
       <div class="bd" id="airlock"><div class="empty">Loading…</div></div>
+    </section>
+    <section class="card">
+      <div class="hd"><h2>Sandbox state</h2><span class="spacer"></span><span class="kv">MinIO · GitHub sandbox · Slack inbox</span></div>
+      <div class="bd" id="sandbox"><div class="empty">Loading…</div></div>
     </section>
     <section class="card">
       <div class="hd"><h2 id="detailTitle">Run trace</h2>
@@ -134,7 +139,11 @@ async function loadHealth() {
     $('#health').innerHTML = p('PostgreSQL', h.postgres) + p('Redis', h.redis) +
       p('Mailpit', h.mailpit, h.mailpit.ok ? ` · <a href="${esc(h.mailpitUrl)}" target="_blank" rel="noopener">open</a>` : '') +
       p('Stripe', h.stripe, h.stripe.ok ? ' (test)' : '') +
-      `<span class="pill">Gate: ≤${h.gate.maxRows} rows · ≤${money(h.gate.maxAmountCents)}</span>`;
+      p('S3', h.minio, h.minio.ok ? ' (MinIO)' : '') +
+      `<span class="pill ok"><i class="dot"></i>GitHub (${esc(h.github.mode)})</span>` +
+      `<span class="pill ok"><i class="dot"></i>Slack (${h.slack.backend === 'sink' ? 'local sink' : esc(h.slack.backend)})</span>` +
+      `<span class="pill">Gate: ≤${h.gate.maxRows} rows · ≤${money(h.gate.maxAmountCents)} · bulk ≤${h.gate.maxBulkItems ?? 10}</span>`;
+    $('#fiveBtn').dataset.avail = h.fiveToolAvailable ? '1' : '';
     const mode = $('#mode');
     mode.querySelector('[value=gemini]').disabled = !h.geminiAvailable;
     if (!h.geminiAvailable && mode.value === 'gemini') mode.value = 'scripted';
@@ -165,7 +174,7 @@ async function loadAirlock() {
   const sig = JSON.stringify(a.emails); const changed = sig !== state.airSig; state.airSig = sig;
   airEmails = a.emails;
   if (!changed) return;
-  $('#airMeta').textContent = `hold ${a.holdSeconds}s · Redis TTL + durable release_at`;
+  $('#airMeta').textContent = `hold ${a.holdSeconds}s · email + Slack · Redis TTL + durable release_at`;
   renderAirlock(a.holdSeconds);
 }
 function renderAirlock(hold) {
@@ -174,21 +183,21 @@ function renderAirlock(hold) {
   const card = (e) => {
     const isHeld = e.status === 'held';
     return `<div class="air ${isHeld ? 'held':''}" data-email="${esc(e.id)}">
-      <div class="row"><span class="badge ${statusBadge(e.status)}">${esc(e.status)}</span>
+      <div class="row"><span class="badge ${statusBadge(e.status)}">${esc(e.status)}</span><span class="badge b-info">${e.channel === 'slack' ? '💬 Slack' : '✉️ Email'}</span>
         <span class="subj">${esc(e.subject)}</span><span class="spacer"></span>
         ${isHeld ? `<span class="count" data-count="${esc(e.releaseAt)}">--</span>` : ''}</div>
-      <div class="kv">to ${esc(e.to.join(', '))} · run <a href="#" data-run="${esc(e.runId)}">${esc(e.runId)}</a></div>
+      <div class="kv">${e.channel === 'slack' ? 'channel' : 'to'} ${esc(e.to.join(', '))} · run <a href="#" data-run="${esc(e.runId)}">${esc(e.runId)}</a></div>
       ${isHeld ? `<div class="bar"><i data-bar="${esc(e.releaseAt)}" data-created="${esc(e.createdAt)}"></i></div>
       <div class="row"><button class="small" data-release="${esc(e.id)}">Release Early</button>
         <button class="small danger" data-kill="${esc(e.runId)}">Kill Switch / Revert Run</button></div>` : ''}
-      ${e.body ? `<details data-key="air-${esc(e.id)}"><summary>Message body</summary><pre>${esc(e.body)}</pre></details>` : ''}
+      ${e.body ? `<details data-key="air-${esc(e.id)}"><summary>${e.channel === 'slack' ? 'Why airlocked' : 'Message body'}</summary><pre>${esc(e.body)}</pre></details>` : ''}
       ${e.error ? `<div class="kv" style="color:var(--bad)">${esc(e.error)}</div>`:''}
     </div>`;
   };
   $('#airlock').innerHTML = held.length || recent.length
-    ? (held.length ? held.map(card).join('') : '<div class="empty" style="padding:6px">Airlock empty: no outbound mail is being held.</div>') +
+    ? (held.length ? held.map(card).join('') : '<div class="empty" style="padding:6px">Airlock empty: no outbound email or Slack is being held.</div>') +
       (recent.length ? `<div class="kv" style="margin:8px 0 6px">Recently resolved</div>` + recent.map(card).join('') : '')
-    : '<div class="empty">Airlock empty: no outbound mail is being held.</div>';
+    : '<div class="empty">Airlock empty: no outbound email or Slack is being held.</div>';
   tick();
 }
 function tick() {
@@ -207,11 +216,23 @@ $('#airlock').addEventListener('click', async (e) => {
   const rel = e.target.closest('[data-release]'), kill = e.target.closest('[data-kill]');
   if (rel) {
     rel.disabled = true;
-    try { await api(`/api/airlock/${rel.dataset.release}/release`, { method: 'POST' }); toast('Email released to Mailpit.'); }
+    try { await api(`/api/airlock/${rel.dataset.release}/release`, { method: 'POST' }); toast('Released from the airlock.'); }
     catch (err) { toast('Release failed: ' + err.message); }
     refresh();
   } else if (kill) await revertRun(kill.dataset.kill, kill);
 });
+
+// ---------- sandbox state ----------
+async function loadSandbox() {
+  const sb = await api('/api/sandbox');
+  const sig = JSON.stringify(sb); if (sig === state.sbSig) return; state.sbSig = sig;
+  const col = (title, inner) => `<div style="min-width:0"><div class="kv" style="font-weight:700;margin-bottom:4px">${title}</div>${inner}</div>`;
+  const li = (t, extra='') => `<div class="mono" style="overflow-wrap:anywhere;${extra}">${t}</div>`;
+  $('#sandbox').innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">` +
+    col(`🪣 s3://${esc(sb.s3.bucket)} (latest)`, sb.s3.objects.length ? sb.s3.objects.map((o) => li(`${esc(o.key)} <span class="kv">${o.size} B</span>`)).join('') : '<div class="kv">empty</div>') +
+    col(`🐙 ${esc(sb.github.repo)} (${sb.github.live ? 'LIVE' : 'sandbox'})`, sb.github.branches.map((b) => li(`${esc(b.name)}${b.protected ? ' 🔒' : ''} <span class="kv">${esc(b.sha.slice(0,7))}</span>`)).join('') + sb.github.changedItems.map((i) => li(`#${i.number} ${esc(i.state)} · ${esc(i.title)}`, 'color:var(--warn)')).join('')) +
+    col(`💬 Slack inbox (${esc(sb.slack.backend === 'sink' ? 'local sink' : sb.slack.backend)})`, sb.slack.inbox.length ? sb.slack.inbox.map((m) => li(`<span style="${m.deleted ? 'text-decoration:line-through;opacity:.6' : ''}">#${esc(m.channel)}: ${esc(m.text)}</span>`)).join('') : '<div class="kv">no messages</div>') + `</div>`;
+}
 
 // ---------- run detail ----------
 async function selectRun(id) { state.runId = id; state.shadow = null; state.detailSig = null; await Promise.all([loadRuns(), loadDetail()]); }
@@ -223,7 +244,7 @@ async function loadDetail() {
   }
   catch (e) { state.detailSig = null; $('#detail').innerHTML = `<div class="empty">${/not found/.test(e.message) ? 'Waiting for the first tool call of this run…' : esc(e.message)}</div>`; }
 }
-const KIND = { postgres: ['🐘 PostgreSQL', 'b-info'], stripe: ['💳 Stripe', 'b-info'], email: ['✉️ Email', 'b-info'] };
+const KIND = { postgres: ['🐘 PostgreSQL', 'b-info'], stripe: ['💳 Stripe', 'b-info'], s3: ['🪣 AWS S3', 'b-info'], github: ['🐙 GitHub', 'b-info'], slack: ['💬 Slack', 'b-info'], email: ['✉️ Email', 'b-info'] };
 function renderDetail() {
   const d = state.detail; if (!d) return;
   // preserve expanded <details> across re-renders
@@ -243,7 +264,9 @@ function renderDetail() {
     if (s.kind === 'email') {
       body += `<div class="kv">subject <b>${esc(s.subject)}</b></div>` + (s.releaseAt ? `<div class="kv">release_at ${esc(new Date(s.releaseAt).toLocaleTimeString())}${s.releasedAt ? ' · released ' + esc(new Date(s.releasedAt).toLocaleTimeString()) : ''}${s.cancelledAt ? ' · cancelled ' + esc(new Date(s.cancelledAt).toLocaleTimeString()) : ''}</div>` : '');
     } else {
-      body += `<div class="kv">${s.kind==='stripe' ? money(s.amountCents) + ' · ' : ''}${s.rowsAffected ?? 0} row/object(s)${s.kind==='postgres' && s.amountCents ? ' · ' + money(s.amountCents) + ' moved' : ''}</div>`;
+      if (s.kind === 'slack' && s.queue) body += `<div class="kv">airlock: <span class="badge ${statusBadge(s.queue.status)}">${esc(s.queue.status)}</span> ${esc(s.queue.reason)} · release_at ${esc(new Date(s.queue.releaseAt).toLocaleTimeString())}</div>`;
+      else if (s.kind === 'slack' && s.gate !== 'blocked') body += `<div class="kv">posted directly (not high-blast)</div>`;
+      body += `<div class="kv">${s.kind==='stripe' ? money(s.amountCents) + ' · ' : ''}${s.rowsAffected ?? 0} ${({s3:'object(s)',github:'item(s)',slack:'message(s)'})[s.kind] || 'row/object(s)'}${s.kind==='postgres' && s.amountCents ? ' · ' + money(s.amountCents) + ' moved' : ''}</div>`;
       if (s.blockReason) body += `<div style="color:var(--bad)"><b>${esc(s.blockReason)}</b></div>`;
       body += `<details data-key="${detailsKey('req')}" ${open(detailsKey('req'))}><summary>Request</summary><pre>${j(s.request)}</pre></details>`;
       const hasBefore = Array.isArray(s.beforeState) ? s.beforeState.length > 0 : s.beforeState != null;
@@ -255,7 +278,7 @@ function renderDetail() {
     return `<li class="step"><div class="sh"><span class="kind">${s.seq ?? '·'}. ${label}</span>${gateBadge(s)}<span class="badge ${statusBadge(s.status)}">${esc(s.status)}</span><span class="tgt mono">${esc(s.action)} → ${esc(s.target)}</span><span class="kv" style="margin-left:auto">${esc(new Date(s.at).toLocaleTimeString())}</span></div><div class="sb">${body}</div></li>`;
   }).join('');
   let crash = '';
-  if (d.drill && d.drill.crashed) crash = `<li class="step" style="border-color:var(--bad)"><div class="sh"><span class="kind">4. 🧨 sync_to_crm</span><span class="badge b-bad">CRASHED</span><span class="tgt">Injected step-4 failure (chaos drill). Triggers the LIFO rollback.</span></div></li>`;
+  if (d.drill && d.drill.crashed) crash = `<li class="step" style="border-color:var(--bad)"><div class="sh"><span class="kind">${d.drill.mode === '5tool' ? 6 : 4}. 🧨 sync_to_crm</span><span class="badge b-bad">CRASHED</span><span class="tgt">Injected step-${d.drill.mode === '5tool' ? 6 : 4} failure (chaos drill). Triggers the LIFO rollback.</span></div></li>`;
   $('#detail').innerHTML = `<ol class="timeline">${steps || '<div class="empty">No tool calls recorded.</div>'}${crash}</ol>${state.shadow ? renderShadow(state.shadow) : ''}`;
 }
 $('#detailActions').addEventListener('click', async (e) => {
@@ -281,12 +304,13 @@ function renderShadow(s) {
   const stepHtml = (st) => {
     let inner = '';
     if (st.rows) inner = st.rows.map((r) => `<div class="diff">#${esc(r.id)} ${Object.keys(r.changed).length ? Object.entries(r.changed).map(([k, [a, b]]) => `${esc(k)}: <span class="from">${esc(JSON.stringify(a))}</span> → <span class="to">${esc(JSON.stringify(b))}</span>`).join(' · ') : (r.after ? 'unchanged' : '<span class="from">deleted</span>')}</div>`).join('');
+    if (st.lines) inner += st.lines.map((l) => `<div class="diff">• ${esc(l)}</div>`).join('');
     if (st.stripe) inner += `<div class="diff">${esc(st.stripe.chargeId)}: refunded ${money(st.stripe.refundedBeforeCents)} → <span class="to">${money(st.stripe.refundedAfterCents)}</span> (simulated)</div>`;
     return `<div style="margin:4px 0"><span class="badge ${st.outcome==='simulated'?'b-ok':st.outcome==='shadow_error'?'b-bad':'b-mute'}">${esc(st.outcome)}</span> <span class="mono">${st.seq}. ${esc(st.actionType)} → ${esc(st.target)}</span>${st.matchesLiveAfterState===false ? ' <span class="badge b-warn">differs from live after-state</span>':''}${st.matchesLiveAfterState===true ? ' <span class="badge b-ok">matches live after-state</span>':''}${st.note ? `<div class="kv">${esc(st.note)}</div>`:''}${st.error ? `<div style="color:var(--bad)">${esc(st.error)}</div>`:''}${inner}</div>`;
   };
   return `<div class="shadow"><div class="row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Shadow-State Replay</b>
     <span class="badge ${ok?'b-ok':'b-bad'}">${ok ? 'live data untouched (fingerprint verified)' : 'LIVE DATA CHANGED, investigate'}</span>
-    <span class="badge b-info">0 Stripe calls</span><span class="badge b-info">0 emails</span></div>
+    <span class="badge b-info">0 Stripe calls</span><span class="badge b-info">0 S3 writes</span><span class="badge b-info">0 GitHub calls</span><span class="badge b-info">0 Slack posts</span><span class="badge b-info">0 emails</span></div>
     <div class="kv">Cloned the saved Before-State into TEMP tables inside a rolled-back transaction.</div>
     <h2 style="margin:10px 0 4px">Forward replay</h2>${s.forward.map(stepHtml).join('')}
     <h2 style="margin:10px 0 4px">LIFO revert (in shadow)</h2>${s.revert.map(stepHtml).join('') || '<div class="kv">Nothing to revert.</div>'}
@@ -301,6 +325,8 @@ async function loadDrill() {
   $('#drillBtn').disabled = active && !stoppable;
   $('#drillBtn').textContent = stoppable ? '■ Stop drill' : active ? '⏳ Drill running…' : '▶ Run Chaos Drill';
   $('#drillBtn').dataset.stop = stoppable ? '1' : '';
+  $('#fiveBtn').disabled = active || ($('#fiveBtn').dataset.avail === '' );
+  $('#fiveBtn').textContent = active && drill && drill.mode === '5tool' ? '⏳ 5-Tool drill running…' : '▶ Run 5-Tool Chaos Drill';
   if (!drill) return;
   const lvl = { starting:'b-warn', running:'b-warn', crashed:'b-bad', reverting:'b-info', done:'b-ok', error:'b-bad' }[drill.status];
   $('#drillBadge').innerHTML = `<span class="badge ${lvl}">${esc(drill.status)}</span> <span class="kv">${esc(drill.mode)}</span>`;
@@ -317,10 +343,16 @@ $('#drillBtn').addEventListener('click', async () => {
   catch (e) { toast(e.message); }
   refresh();
 });
+$('#fiveBtn').addEventListener('click', async () => {
+  $('#fiveBtn').disabled = true;
+  try { await api('/api/drill', { method: 'POST', body: JSON.stringify({ mode: '5tool' }) }); state.userPicked = false; state.runId = null; state.detail = null; state.detailSig = null; toast('5-tool chaos drill started.'); }
+  catch (e) { toast(e.message); }
+  refresh();
+});
 $('#runs').addEventListener('click', () => { state.userPicked = true; });
 
 async function refresh() {
-  await Promise.allSettled([loadRuns(), loadAirlock(), loadDrill(), loadDetail()]);
+  await Promise.allSettled([loadRuns(), loadAirlock(), loadDrill(), loadDetail(), loadSandbox()]);
   if (state.runId && !state.detail) return;
 }
 loadHealth(); refresh();

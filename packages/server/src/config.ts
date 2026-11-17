@@ -28,7 +28,33 @@ export const config = {
     from: process.env.SMTP_FROM ?? 'savepoint-agent@savepoint.local',
   },
   stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? '',
+  s3: {
+    endpoint: process.env.S3_ENDPOINT ?? 'http://localhost:9000',
+    region: process.env.S3_REGION ?? 'us-east-1',
+    forcePathStyle: (process.env.S3_FORCE_PATH_STYLE ?? 'true') !== 'false',
+    // Defaults match the local MinIO service in docker-compose.yml.
+    accessKeyId: process.env.S3_ACCESS_KEY_ID ?? 'savepoint_minio',
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? 'savepoint_minio_password',
+    defaultBucket: process.env.S3_BUCKET ?? 'savepoint-sandbox',
+    /** Recovery vault: exact prior bytes + metadata are copied here before any overwrite/delete. */
+    vaultBucket: process.env.S3_VAULT_BUCKET ?? 'savepoint-vault',
+  },
+  github: {
+    token: process.env.GITHUB_TOKEN ?? '',
+    sandboxPort: int('GITHUB_SANDBOX_PORT', 4010),
+    defaultRepo: process.env.GITHUB_DEFAULT_REPO ?? 'savepoint-sandbox/demo',
+    /** Branches that may never be deleted through the proxy (in addition to API-reported protection). */
+    protectedBranches: ['main', 'master'],
+  },
+  slack: {
+    botToken: process.env.SLACK_BOT_TOKEN ?? '',
+    webhookUrl: process.env.SLACK_WEBHOOK_URL ?? '',
+    /** Channels starting with these prefixes count as external / shared and are airlocked. */
+    externalChannelPrefixes: (process.env.SLACK_EXTERNAL_PREFIXES ?? 'ext-,shared-,partner-,customer-').split(',').filter(Boolean),
+  },
   gate: {
+    /** Bulk limit for S3 deletes, GitHub items/branches and Slack messages per run (strictly more is blocked). */
+    maxBulkItems: int('SAVEPOINT_MAX_BULK_ITEMS', 10),
     /** A single call may touch at most this many rows (strictly more is blocked). */
     maxRows: int('SAVEPOINT_MAX_ROWS', 10),
     /** A single call may move at most this many cents (strictly more is blocked). $1,000 by default. */
@@ -41,7 +67,7 @@ export const config = {
   /** Columns whose numeric change counts as money moved for the $ gate. */
   monetaryColumns: ['balance_cents'],
   /** Tables an agent may never mutate through the proxy. */
-  protectedTablePrefixes: ['savepoint_', 'schema_migrations', 'pg_'],
+  protectedTablePrefixes: ['savepoint_', 'sandbox_', 'schema_migrations', 'pg_'],
 } as const;
 
 export type Config = typeof config;

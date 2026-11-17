@@ -5,6 +5,9 @@ import type { Savepoint } from '../engine/index.js';
 import { RUN_ID_PATTERN } from '../engine/ledger.js';
 import { deleteRequestSchema, updateRequestSchema } from '../engine/postgres.js';
 import { refundRequestSchema } from '../engine/stripe.js';
+import { s3AclRequestSchema, s3DeleteRequestSchema, s3PutRequestSchema } from '../engine/s3.js';
+import { githubDeleteBranchesSchema, githubUpdateRequestSchema } from '../engine/github.js';
+import { slackArchiveSchema, slackPostSchema } from '../engine/slack.js';
 
 const runId = z.string().regex(RUN_ID_PATTERN).describe('Agent run / session id. Every action in a run can be reverted together.');
 
@@ -79,12 +82,101 @@ export function createMcpServer(sp: Savepoint): McpServer {
     (args) => guard(() => sp.sendEmail(args)),
   );
 
+
+  const bulk = sp.config.gate.maxBulkItems;
+
+  // ---- AWS S3 ----
+  server.registerTool(
+    'savepoint_s3_put_object',
+    {
+      title: 'Put an S3 object (vault-snapshotted)',
+      description: 'Create or overwrite an S3 object. Any existing bytes + metadata are copied to the recovery vault first; revert restores them exactly (or deletes the object if it is new).',
+      inputSchema: s3PutRequestSchema.extend({ runId }),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.putObject(args)),
+  );
+  server.registerTool(
+    'savepoint_s3_delete_objects',
+    {
+      title: 'Delete S3 objects (vault-snapshotted, bulk-gated)',
+      description: `Delete S3 objects by explicit keys or by prefix. Every object is vaulted first. Blocked if more than ${bulk} objects would be deleted.`,
+      inputSchema: s3DeleteRequestSchema.and(z.object({ runId })),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.deleteObjects(args)),
+  );
+  server.registerTool(
+    'savepoint_s3_set_bucket_acl',
+    {
+      title: 'Set an S3 bucket ACL (public-exposure gated)',
+      description: 'Set a bucket ACL. Any public ACL (public-read, public-read-write, authenticated-read) is blocked; only "private" is allowed.',
+      inputSchema: s3AclRequestSchema.extend({ runId }),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.setBucketAcl(args)),
+  );
+
+  // ---- GitHub ----
+  server.registerTool(
+    'savepoint_github_update_issues',
+    {
+      title: 'Edit or close GitHub issues (snapshotted, bulk-gated)',
+      description: `Edit title/body/labels/state of issues. Prior state is snapshotted; revert restores it. Blocked if more than ${bulk} issues are touched in one call. Uses the offline sandbox unless GITHUB_TOKEN is set.`,
+      inputSchema: githubUpdateRequestSchema.and(z.object({ runId })),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.updateIssues(args)),
+  );
+  server.registerTool(
+    'savepoint_github_update_pulls',
+    {
+      title: 'Edit or close GitHub pull requests (snapshotted, bulk-gated)',
+      description: `Edit title/body/state/base of pull requests. Prior state is snapshotted. Blocked if more than ${bulk} PRs are touched in one call.`,
+      inputSchema: githubUpdateRequestSchema.and(z.object({ runId })),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.updatePulls(args)),
+  );
+  server.registerTool(
+    'savepoint_github_delete_branches',
+    {
+      title: 'Delete GitHub branches (head-SHA snapshotted, protected-gated)',
+      description: `Delete branches. The head commit SHA of each is saved so revert can recreate the ref. Blocked for protected branches (main/master/API-protected) or more than ${bulk} branches.`,
+      inputSchema: githubDeleteBranchesSchema.and(z.object({ runId })),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.deleteBranches(args)),
+  );
+
+  // ---- Slack ----
+  server.registerTool(
+    'savepoint_slack_post',
+    {
+      title: 'Post to Slack (airlock for high-blast messages)',
+      description: `Post a Slack message. @channel/@here/@everyone, external/shared channels and webhooks are held ${sp.config.airlock.holdSeconds}s in the staging airlock and cancelled if the run is reverted; others post immediately and are deleted on revert. More than ${bulk} messages per run is blocked as a spam spike.`,
+      inputSchema: slackPostSchema.extend({ runId }),
+      annotations: { openWorldHint: true },
+    },
+    (args) => guard(() => sp.slackPost(args)),
+  );
+  server.registerTool(
+    'savepoint_slack_archive_channel',
+    {
+      title: 'Archive a Slack channel (always blocked)',
+      description: 'Channel archiving is never permitted for agents; the attempt is recorded as blocked.',
+      inputSchema: slackArchiveSchema.extend({ runId }),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    (args) => guard(() => sp.slackArchive(args)),
+  );
+
   server.registerTool(
     'savepoint_revert',
     {
       title: 'Revert a run',
       description:
-        'Cancel the run\'s held emails, then undo every applied action in strict last-in-first-out order (restore Postgres rows from snapshots, compensate Stripe refunds). Safe to call again; it resumes after a failure.',
+        'Cancel the run\'s held emails and Slack posts, then undo every applied action in strict last-in-first-out order (restore Postgres rows, compensate Stripe refunds, restore S3 objects from the vault, restore GitHub issues/PRs and recreate deleted branches, delete posted Slack messages). Safe to call again; it resumes after a failure.',
       inputSchema: z.object({ runId }),
       annotations: { destructiveHint: true, idempotentHint: true },
     },

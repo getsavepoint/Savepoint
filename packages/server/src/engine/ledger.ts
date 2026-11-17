@@ -1,6 +1,10 @@
 import type pg from 'pg';
 
-export type ActionType = 'pg.update' | 'pg.delete' | 'stripe.refund';
+export type ActionType =
+  | 'pg.update' | 'pg.delete' | 'stripe.refund'
+  | 's3.put' | 's3.delete' | 's3.acl'
+  | 'github.issue_update' | 'github.pr_update' | 'github.branch_delete'
+  | 'slack.post' | 'slack.archive';
 export type SnapshotStatus = 'pending' | 'applied' | 'blocked' | 'failed' | 'reverted' | 'revert_failed';
 
 export interface SnapshotRow {
@@ -97,4 +101,41 @@ export class SavepointError extends Error {
     super(message);
     this.name = 'SavepointError';
   }
+}
+
+/**
+ * Connector write-ahead pattern: commit a ledger row (seq reserved under the run lock)
+ * BEFORE the external side effect, so a crash mid-call still leaves a revertable record.
+ */
+export async function recordAction(pool: pg.Pool, s: Omit<NewSnapshot, 'seq'>): Promise<SnapshotRow> {
+  assertRunId(s.runId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockRunXact(client, s.runId);
+    const seq = await nextSeq(client, s.runId);
+    const row = await insertSnapshot(client, { ...s, seq });
+    await client.query('COMMIT');
+    return row;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function completeAction(pool: pg.Pool, id: string, afterState: unknown): Promise<void> {
+  await pool.query(`UPDATE savepoint_snapshots SET status = 'applied', after_state = $2, error = NULL WHERE id = $1`, [id, JSON.stringify(afterState)]);
+}
+
+/** Leave the row 'pending' (outcome unknown / partial) so revert() still compensates it. */
+export async function noteActionError(pool: pg.Pool, id: string, message: string, afterState?: unknown): Promise<void> {
+  await pool.query(`UPDATE savepoint_snapshots SET error = $2, after_state = COALESCE($3::jsonb, after_state) WHERE id = $1`, [
+    id, message, afterState === undefined ? null : JSON.stringify(afterState),
+  ]);
+}
+
+export function evaluateBulk(count: number, limit: number, noun: string): string | null {
+  return count > limit ? `Blast-radius gate: affects ${count} ${noun} (limit ${limit} per call)` : null;
 }

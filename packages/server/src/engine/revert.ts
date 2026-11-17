@@ -1,5 +1,8 @@
 import type pg from 'pg';
 import type { Airlock } from './airlock.js';
+import type { S3Proxy } from './s3.js';
+import type { GitHubProxy } from './github.js';
+import type { SlackProxy } from './slack.js';
 import { assertRunId, runLockKey, type SnapshotRow } from './ledger.js';
 import type { PostgresProxy } from './postgres.js';
 import type { StripeProxy } from './stripe.js';
@@ -19,6 +22,7 @@ export interface RevertReport {
   /** true when every applied action in the run has been compensated. */
   complete: boolean;
   emails: { cancelled: string[]; alreadySent: string[] };
+  slack: { cancelled: string[]; alreadySent: string[] };
   steps: RevertStep[];
   /** seqs still un-reverted because LIFO halted at the first failure. */
   remaining: number[];
@@ -29,6 +33,9 @@ export interface RevertDeps {
   airlock: Airlock;
   postgres: PostgresProxy;
   stripe: StripeProxy;
+  s3: S3Proxy;
+  github: GitHubProxy;
+  slack: SlackProxy;
 }
 
 /**
@@ -47,7 +54,9 @@ export async function revertRun(deps: RevertDeps, runId: string): Promise<Revert
     // Session-level lock: blocks new mutations in this run for the whole revert.
     await client.query('SELECT pg_advisory_lock(hashtext($1))', [runLockKey(runId)]);
 
+    // Stop everything outbound first: held emails and held Slack posts.
     const emails = await deps.airlock.cancelRun(runId);
+    const slack = await deps.slack.cancelRun(runId);
 
     const { rows: snaps } = await client.query<SnapshotRow>(
       `SELECT * FROM savepoint_snapshots
@@ -64,6 +73,15 @@ export async function revertRun(deps: RevertDeps, runId: string): Promise<Revert
         let compensation: Record<string, unknown>;
         if (snap.action_type === 'stripe.refund') {
           compensation = await deps.stripe.compensate(snap);
+          await markReverted(client, snap.id, compensation);
+        } else if (snap.action_type.startsWith('s3.')) {
+          compensation = await deps.s3.restore(snap);
+          await markReverted(client, snap.id, compensation);
+        } else if (snap.action_type.startsWith('github.')) {
+          compensation = await deps.github.restore(snap);
+          await markReverted(client, snap.id, compensation);
+        } else if (snap.action_type === 'slack.post') {
+          compensation = await deps.slack.compensate(snap);
           await markReverted(client, snap.id, compensation);
         } else {
           await client.query('BEGIN');
@@ -83,7 +101,7 @@ export async function revertRun(deps: RevertDeps, runId: string): Promise<Revert
     }
 
     const remaining = haltedAt < 0 ? [] : snaps.slice(haltedAt).map((s) => s.seq);
-    return { runId, complete: haltedAt < 0, emails, steps, remaining };
+    return { runId, complete: haltedAt < 0, emails, slack, steps, remaining };
   } finally {
     await client.query('SELECT pg_advisory_unlock(hashtext($1))', [runLockKey(runId)]).catch(() => {});
     client.release();

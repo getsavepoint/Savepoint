@@ -16,7 +16,9 @@
     "dev": "npm run dev -w @savepoint/server",
     "worker": "npm run worker -w @savepoint/server",
     "demo": "npm run demo -w @savepoint/server",
-    "dashboard": "npm run dashboard -w @savepoint/server"
+    "dashboard": "npm run dashboard -w @savepoint/server",
+    "test": "npm test -w @savepoint/server",
+    "drill:5tool": "npm run drill:5tool -w @savepoint/server"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

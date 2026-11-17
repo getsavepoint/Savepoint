@@ -2,6 +2,7 @@ import pg from 'pg';
 import { Redis } from 'ioredis';
 import nodemailer, { type Transporter } from 'nodemailer';
 import Stripe from 'stripe';
+import { S3Client } from '@aws-sdk/client-s3';
 import { config } from './config.js';
 
 export interface Infra {
@@ -10,6 +11,7 @@ export interface Infra {
   mailer: Transporter;
   /** null when STRIPE_SECRET_KEY is unset. */
   stripe: Stripe | null;
+  s3: S3Client;
   close(): Promise<void>;
 }
 
@@ -33,13 +35,21 @@ export function createInfra(): Infra {
     assertTestStripeKey(config.stripeSecretKey);
     stripe = new Stripe(config.stripeSecretKey);
   }
+  const s3 = new S3Client({
+    endpoint: config.s3.endpoint,
+    region: config.s3.region,
+    forcePathStyle: config.s3.forcePathStyle,
+    credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+  });
   return {
     pool,
+    s3,
     redis,
     mailer,
     stripe,
     async close() {
       mailer.close();
+      s3.destroy();
       redis.disconnect();
       await pool.end();
     },
