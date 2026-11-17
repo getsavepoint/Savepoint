@@ -15,7 +15,8 @@
     "db:seed": "npm run db:seed -w @savepoint/server",
     "dev": "npm run dev -w @savepoint/server",
     "worker": "npm run worker -w @savepoint/server",
-    "demo": "npm run demo -w @savepoint/server"
+    "demo": "npm run demo -w @savepoint/server",
+    "dashboard": "npm run dashboard -w @savepoint/server"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

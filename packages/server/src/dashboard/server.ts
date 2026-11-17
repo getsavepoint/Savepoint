@@ -1,0 +1,302 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { Savepoint } from '../engine/index.js';
+import { RUN_ID_PATTERN, SavepointError, type SnapshotRow } from '../engine/ledger.js';
+import type { AirlockRow } from '../engine/airlock.js';
+import { DrillManager, type DrillMode } from './drill.js';
+import { shadowReplay } from './shadow.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const publicDir = existsSync(resolve(here, 'public')) ? resolve(here, 'public') : resolve(here, '../../src/dashboard/public');
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+type RunStatus = 'active' | 'failed' | 'reverted' | 'blocked' | 'completed';
+
+class HttpError extends Error {
+  constructor(readonly status: number, message: string, readonly code = 'error') {
+    super(message);
+  }
+}
+
+export interface DashboardOptions {
+  sp: Savepoint;
+  port: number;
+  host?: string;
+}
+
+export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptions): { server: Server; drills: DrillManager } {
+  const pool = sp.infra.pool;
+  const drills = new DrillManager(sp);
+  const allowedHosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`]);
+  const mailpitUrl = `http://${sp.config.smtp.host}:8025`;
+
+  const json = (res: ServerResponse, status: number, body: unknown) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+
+  async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > 64_000) throw new HttpError(413, 'Body too large');
+      chunks.push(c as Buffer);
+    }
+    if (size === 0) return {};
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    } catch {
+      throw new HttpError(400, 'Invalid JSON');
+    }
+  }
+
+  const runIdParam = (raw: string) => {
+    const id = decodeURIComponent(raw);
+    if (!RUN_ID_PATTERN.test(id)) throw new HttpError(400, 'Invalid run id');
+    return id;
+  };
+
+  // ---- derived views ---------------------------------------------------------------------------
+  function deriveStatus(c: { applied: number; blocked: number; reverted: number; failed: number; pending: number; held: number }, crashedUnreverted: boolean): RunStatus {
+    if (c.failed > 0) return 'failed';
+    if (crashedUnreverted) return 'failed';
+    if (c.held > 0) return 'active';
+    if (c.reverted > 0 && c.applied === 0 && c.pending === 0) return 'reverted';
+    if (c.pending > 0) return 'active';
+    if (c.applied === 0 && c.blocked > 0) return 'blocked';
+    return 'completed';
+  }
+
+  async function listRuns() {
+    const { rows } = await pool.query(`
+      WITH s AS (
+        SELECT run_id,
+               count(*)::int AS steps,
+               count(*) FILTER (WHERE status = 'applied')::int AS applied,
+               count(*) FILTER (WHERE status = 'blocked')::int AS blocked,
+               count(*) FILTER (WHERE status = 'reverted')::int AS reverted,
+               count(*) FILTER (WHERE status IN ('failed', 'revert_failed'))::int AS failed,
+               count(*) FILTER (WHERE status = 'pending')::int AS pending,
+               min(created_at) AS started_at,
+               max(GREATEST(created_at, reverted_at)) AS last_at
+          FROM savepoint_snapshots GROUP BY run_id),
+      a AS (
+        SELECT run_id,
+               count(*)::int AS emails,
+               count(*) FILTER (WHERE status = 'held')::int AS held,
+               count(*) FILTER (WHERE status = 'released')::int AS released,
+               count(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
+               min(created_at) AS started_at,
+               max(GREATEST(created_at, cancelled_at, released_at)) AS last_at
+          FROM savepoint_airlock_queue GROUP BY run_id)
+      SELECT COALESCE(s.run_id, a.run_id) AS run_id,
+             COALESCE(s.steps, 0) AS steps, COALESCE(s.applied, 0) AS applied, COALESCE(s.blocked, 0) AS blocked,
+             COALESCE(s.reverted, 0) AS reverted, COALESCE(s.failed, 0) AS failed, COALESCE(s.pending, 0) AS pending,
+             COALESCE(a.emails, 0) AS emails, COALESCE(a.held, 0) AS held,
+             COALESCE(a.released, 0) AS released, COALESCE(a.cancelled, 0) AS cancelled,
+             LEAST(s.started_at, a.started_at) AS started_at,
+             GREATEST(s.last_at, a.last_at) AS last_at
+        FROM s FULL JOIN a ON a.run_id = s.run_id
+       ORDER BY GREATEST(s.last_at, a.last_at) DESC NULLS LAST
+       LIMIT 60`);
+    return rows.map((r) => {
+      const drill = drills.byRun.get(r.run_id);
+      const crashedUnreverted = Boolean(drill?.crashed) && r.reverted === 0 && r.applied > 0;
+      const status = deriveStatus(r, crashedUnreverted);
+      return { ...r, status, isDrill: Boolean(drill), drillStatus: drill?.status ?? null };
+    });
+  }
+
+  const gateOf = (s: SnapshotRow) => (s.status === 'blocked' ? 'blocked' : 'approved');
+
+  async function runDetail(runId: string) {
+    const { rows: snaps } = await pool.query<SnapshotRow>('SELECT * FROM savepoint_snapshots WHERE run_id = $1 ORDER BY seq', [runId]);
+    const { rows: emails } = await pool.query<AirlockRow>('SELECT * FROM savepoint_airlock_queue WHERE run_id = $1 ORDER BY created_at', [runId]);
+    if (snaps.length === 0 && emails.length === 0) throw new HttpError(404, `Run "${runId}" not found`);
+    const drill = drills.byRun.get(runId);
+    const steps = [
+      ...snaps.map((s) => ({
+        kind: s.action_type === 'stripe.refund' ? 'stripe' : 'postgres',
+        id: s.id,
+        seq: s.seq,
+        at: s.created_at,
+        action: s.action_type,
+        target: s.target,
+        gate: gateOf(s),
+        status: s.status,
+        blockReason: s.block_reason,
+        rowsAffected: s.rows_affected,
+        amountCents: s.amount_cents === null ? null : Number(s.amount_cents),
+        request: s.request,
+        beforeState: s.before_state,
+        afterState: s.after_state,
+        compensation: s.compensation,
+        error: s.error,
+        revertedAt: s.reverted_at,
+      })),
+      ...emails.map((e) => ({
+        kind: 'email',
+        id: e.id,
+        seq: null,
+        at: e.created_at,
+        action: 'email.send',
+        target: e.to_addresses.join(', '),
+        gate: 'airlock',
+        status: e.status,
+        subject: e.subject,
+        body: e.text_body ?? e.html_body,
+        releaseAt: e.release_at,
+        releasedAt: e.released_at,
+        cancelledAt: e.cancelled_at,
+        error: e.error,
+      })),
+    ].sort((a, b) => +new Date(a.at) - +new Date(b.at));
+    const counts = {
+      applied: snaps.filter((s) => s.status === 'applied').length,
+      blocked: snaps.filter((s) => s.status === 'blocked').length,
+      reverted: snaps.filter((s) => s.status === 'reverted').length,
+      failed: snaps.filter((s) => s.status === 'failed' || s.status === 'revert_failed').length,
+      pending: snaps.filter((s) => s.status === 'pending').length,
+      held: emails.filter((e) => e.status === 'held').length,
+    };
+    const crashedUnreverted = Boolean(drill?.crashed) && counts.reverted === 0 && counts.applied > 0;
+    return {
+      runId,
+      status: deriveStatus(counts, crashedUnreverted),
+      counts,
+      steps,
+      drill: drill ? { id: drill.id, mode: drill.mode, status: drill.status, crashed: drill.crashed, events: drill.events } : null,
+      now: new Date().toISOString(),
+    };
+  }
+
+  async function airlockView() {
+    const { rows } = await pool.query<AirlockRow>(
+      `SELECT * FROM savepoint_airlock_queue
+        WHERE status IN ('held', 'releasing') OR created_at > now() - interval '30 minutes'
+        ORDER BY (status = 'held') DESC, release_at ASC LIMIT 40`,
+    );
+    return {
+      now: new Date().toISOString(),
+      holdSeconds: sp.config.airlock.holdSeconds,
+      emails: rows.map((e) => ({
+        id: e.id,
+        runId: e.run_id,
+        status: e.status,
+        from: e.from_address,
+        to: e.to_addresses,
+        subject: e.subject,
+        body: e.text_body ?? e.html_body,
+        createdAt: e.created_at,
+        releaseAt: e.release_at,
+        releasedAt: e.released_at,
+        cancelledAt: e.cancelled_at,
+        error: e.error,
+      })),
+    };
+  }
+
+  async function health() {
+    const timed = async <T>(fn: () => Promise<T>): Promise<{ ok: boolean; detail?: string }> => {
+      try {
+        await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500))]);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, detail: (e as Error).message };
+      }
+    };
+    const [postgres, redis, mailpit, stripe] = await Promise.all([
+      timed(() => pool.query('SELECT 1')),
+      timed(() => sp.infra.redis.ping()),
+      timed(async () => {
+        const r = await fetch(`${mailpitUrl}/api/v1/info`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      }),
+      sp.infra.stripe ? timed(() => sp.infra.stripe!.balance.retrieve()) : Promise.resolve({ ok: false, detail: 'STRIPE_SECRET_KEY not set' }),
+    ]);
+    return {
+      postgres, redis, mailpit, stripe,
+      mailpitUrl: `http://localhost:8025`,
+      stripeMode: sp.infra.stripe ? 'test' : null,
+      holdSeconds: sp.config.airlock.holdSeconds,
+      gate: sp.config.gate,
+      geminiAvailable: drills.geminiAvailable(),
+      scriptedAvailable: Boolean(sp.infra.stripe),
+    };
+  }
+
+  // ---- request router --------------------------------------------------------------------------
+  async function route(req: IncomingMessage, res: ServerResponse) {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const path = url.pathname;
+    const method = req.method ?? 'GET';
+
+    // DNS-rebinding / drive-by protection: only our own origin may talk to this server.
+    if (!allowedHosts.has(String(req.headers.host))) throw new HttpError(403, 'Forbidden host');
+    if (method !== 'GET' && method !== 'HEAD') {
+      const origin = req.headers.origin;
+      if (origin && ![...allowedHosts].some((h) => origin === `http://${h}`)) throw new HttpError(403, 'Forbidden origin');
+      if (req.headers['x-savepoint-ui'] !== '1') throw new HttpError(403, 'Missing X-Savepoint-UI header');
+    }
+
+    if (method === 'GET' && (path === '/' || path === '/index.html')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(readFileSync(resolve(publicDir, 'index.html')));
+      return;
+    }
+    if (method === 'GET' && path === '/api/health') return json(res, 200, await health());
+    if (method === 'GET' && path === '/api/runs') return json(res, 200, { now: new Date().toISOString(), runs: await listRuns() });
+    if (method === 'GET' && path === '/api/airlock') return json(res, 200, await airlockView());
+    if (method === 'GET' && path === '/api/drill') {
+      const d = drills.latest;
+      return json(res, 200, { drill: d ?? null, active: Boolean(drills.active) });
+    }
+
+    let m: RegExpExecArray | null;
+    if (method === 'GET' && (m = /^\/api\/runs\/([^/]+)$/.exec(path))) return json(res, 200, await runDetail(runIdParam(m[1]!)));
+
+    if (method === 'POST' && (m = /^\/api\/runs\/([^/]+)\/revert$/.exec(path))) {
+      const runId = runIdParam(m[1]!);
+      const report = await sp.revert(runId);
+      return json(res, 200, report);
+    }
+    if (method === 'POST' && (m = /^\/api\/runs\/([^/]+)\/replay$/.exec(path))) {
+      return json(res, 200, await shadowReplay(pool, runIdParam(m[1]!)));
+    }
+    if (method === 'POST' && (m = /^\/api\/airlock\/([^/]+)\/release$/.exec(path))) {
+      const id = m[1]!;
+      if (!UUID.test(id)) throw new HttpError(400, 'Invalid email id');
+      const result = await sp.airlock.releaseNow(id);
+      if (result === 'not_held') throw new HttpError(409, 'Email is no longer held (already released, cancelled or reverted)', 'not_held');
+      if (result === 'send_failed') throw new HttpError(502, 'SMTP send failed; message returned to the airlock queue', 'send_failed');
+      return json(res, 200, { status: 'released', id });
+    }
+    if (method === 'POST' && path === '/api/drill/stop') return json(res, 200, { stopped: drills.stop() });
+    if (method === 'POST' && path === '/api/drill') {
+      const body = await readBody(req);
+      const mode: DrillMode = body.mode === 'scripted' ? 'scripted' : 'gemini';
+      try {
+        const d = drills.start(mode);
+        return json(res, 202, { drill: d });
+      } catch (e) {
+        throw new HttpError(409, (e as Error).message, 'drill_unavailable');
+      }
+    }
+    throw new HttpError(404, 'Not found');
+  }
+
+  const server = createServer((req, res) => {
+    route(req, res).catch((err) => {
+      if (res.headersSent) return res.end();
+      if (err instanceof HttpError) return json(res, err.status, { error: err.message, code: err.code });
+      if (err instanceof SavepointError) return json(res, 400, { error: err.message, code: err.code });
+      console.error('[dashboard] error:', err);
+      return json(res, 500, { error: (err as Error).message });
+    });
+  });
+  server.listen(port, host);
+  return { server, drills };
+}

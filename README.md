@@ -37,3 +37,21 @@ npx tsx packages/sdk/examples/quickstart.ts # SDK -> MCP stdio -> engine
 - A Stripe refund can only be compensated if the original PaymentIntent has a customer and a reusable payment method. Otherwise revert stops with `revert_failed` and someone has to fix it by hand. Live keys (`sk_live_`) are refused.
 - Email delivery is at-most-once. A message that is mid-send when the process crashes stays in `releasing` and is not retried. Email that has already been sent cannot be recalled; `revert` lists it under `alreadySent`.
 - When a revert restores a row that changed after the agent touched it, the row ID is listed under `drifted`. The snapshot is still applied.
+
+## Visual Trace & Airlock Dashboard
+
+```bash
+npm run dashboard   # http://localhost:3000 (needs `docker compose up -d`)
+```
+
+Live run/tool-call trace with Before-State snapshots, the 60-second staging airlock
+(Release Early / Kill Switch), Shadow-State Replay, and a one-click Chaos Drill
+(Gemini agent or a deterministic scripted agent). Binds to 127.0.0.1 only.
+
+## Licensing (open core)
+
+| Path | License |
+| --- | --- |
+| `packages/sdk` | MIT |
+| `packages/server` | FSL-1.1-MIT (converts to MIT after two years) |
+| `ee/` | Proprietary, all rights reserved |

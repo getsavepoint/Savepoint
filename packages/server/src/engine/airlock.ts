@@ -100,7 +100,7 @@ export class Airlock {
 
   /** One worker pass: release every due message whose Redis hold has expired. */
   async releaseDue(limit = 25): Promise<number> {
-    const { pool, redis, mailer } = this.deps;
+    const { pool, redis } = this.deps;
     const { rows: due } = await pool.query<{ id: string }>(
       `SELECT id FROM savepoint_airlock_queue
         WHERE status = 'held' AND release_at <= now() ORDER BY release_at LIMIT $1`,
@@ -109,42 +109,66 @@ export class Airlock {
     let released = 0;
     for (const { id } of due) {
       if (await redis.exists(holdKey(id))) continue; // hold still active (e.g. clock skew)
-      // Atomic claim: a concurrent cancelRun() and this UPDATE cannot both win.
-      const { rows } = await pool.query<AirlockRow>(
-        `UPDATE savepoint_airlock_queue SET status = 'releasing', attempts = attempts + 1
-          WHERE id = $1 AND status = 'held' RETURNING *`,
-        [id],
-      );
-      const msg = rows[0];
-      if (!msg) continue;
-      try {
-        const info = await mailer.sendMail({
-          from: msg.from_address,
-          to: msg.to_addresses,
-          subject: msg.subject,
-          ...(msg.text_body !== null ? { text: msg.text_body } : {}),
-          ...(msg.html_body !== null ? { html: msg.html_body } : {}),
-          headers: { 'X-Savepoint-Run-Id': msg.run_id, 'X-Savepoint-Airlock-Id': msg.id },
-        });
-        await pool.query(
-          `UPDATE savepoint_airlock_queue SET status = 'released', released_at = now(), smtp_message_id = $2, error = NULL
-            WHERE id = $1`,
-          [msg.id, info.messageId ?? null],
-        );
-        released++;
-        this.deps.log?.(`airlock: released ${msg.id} (run ${msg.run_id}) to ${msg.to_addresses.join(', ')}`);
-      } catch (err) {
-        const giveUp = msg.attempts >= MAX_ATTEMPTS;
-        await pool.query(
-          `UPDATE savepoint_airlock_queue
-              SET status = $2, error = $3, release_at = now() + make_interval(secs => $4)
-            WHERE id = $1`,
-          [msg.id, giveUp ? 'failed' : 'held', (err as Error).message, 10 * msg.attempts],
-        );
-        this.deps.log?.(`airlock: send failed for ${msg.id}: ${(err as Error).message}`);
-      }
+      if (await this.deliver(id)) released++;
     }
     return released;
+  }
+
+  /** Operator override: skip the remaining hold and send one held message now. */
+  async releaseNow(id: string): Promise<'released' | 'not_held' | 'send_failed'> {
+    const { rows } = await this.deps.pool.query<{ id: string }>(
+      `SELECT id FROM savepoint_airlock_queue WHERE id = $1 AND status = 'held'`,
+      [id],
+    );
+    if (rows.length === 0) return 'not_held';
+    await this.deps.redis.del(holdKey(id));
+    const sent = await this.deliver(id);
+    if (sent) return 'released';
+    const { rows: after } = await this.deps.pool.query<{ status: string }>(
+      `SELECT status FROM savepoint_airlock_queue WHERE id = $1`,
+      [id],
+    );
+    return after[0]?.status === 'released' ? 'released' : after[0]?.status === 'cancelled' ? 'not_held' : 'send_failed';
+  }
+
+  /** Atomically claim one held message and hand it to SMTP. Returns true when it was sent. */
+  private async deliver(id: string): Promise<boolean> {
+    const { pool, mailer } = this.deps;
+    // Atomic claim: a concurrent cancelRun() and this UPDATE cannot both win.
+    const { rows } = await pool.query<AirlockRow>(
+      `UPDATE savepoint_airlock_queue SET status = 'releasing', attempts = attempts + 1
+        WHERE id = $1 AND status = 'held' RETURNING *`,
+      [id],
+    );
+    const msg = rows[0];
+    if (!msg) return false;
+    try {
+      const info = await mailer.sendMail({
+        from: msg.from_address,
+        to: msg.to_addresses,
+        subject: msg.subject,
+        ...(msg.text_body !== null ? { text: msg.text_body } : {}),
+        ...(msg.html_body !== null ? { html: msg.html_body } : {}),
+        headers: { 'X-Savepoint-Run-Id': msg.run_id, 'X-Savepoint-Airlock-Id': msg.id },
+      });
+      await pool.query(
+        `UPDATE savepoint_airlock_queue SET status = 'released', released_at = now(), smtp_message_id = $2, error = NULL
+          WHERE id = $1`,
+        [msg.id, info.messageId ?? null],
+      );
+      this.deps.log?.(`airlock: released ${msg.id} (run ${msg.run_id}) to ${msg.to_addresses.join(', ')}`);
+      return true;
+    } catch (err) {
+      const giveUp = msg.attempts >= MAX_ATTEMPTS;
+      await pool.query(
+        `UPDATE savepoint_airlock_queue
+            SET status = $2, error = $3, release_at = now() + make_interval(secs => $4)
+          WHERE id = $1`,
+        [msg.id, giveUp ? 'failed' : 'held', (err as Error).message, 10 * msg.attempts],
+      );
+      this.deps.log?.(`airlock: send failed for ${msg.id}: ${(err as Error).message}`);
+      return false;
+    }
   }
 
   startWorker(intervalMs = 1000): { stop(): Promise<void> } {

@@ -166,6 +166,13 @@ console.log(`postgres row #${CUSTOMER_ID}  : ${JSON.stringify(midRow)}`);
 console.log(`stripe charge     : refunded=$${midCharge.amount_refunded / 100}`);
 console.log(`airlock emails    : ${runInfo.emails.map((e) => `${e.id}=${e.status}`).join(', ') || 'none'}`);
 
+// Optional (dashboard demo): hold the crashed state on screen before rolling back.
+const pauseMs = Number(process.env.CHAOS_PAUSE_MS ?? 0);
+if (pauseMs > 0) {
+  console.log(`pausing ${pauseMs / 1000}s so the airlock hold and crash are visible before revert…`);
+  await sleep(pauseMs);
+}
+
 rule('SAVEPOINT REVERT');
 const revert = (await mcp.callTool({ name: 'savepoint_revert', arguments: { runId } })).structuredContent as {
   complete: boolean;
