@@ -6,6 +6,24 @@ A safety proxy for AI agents. It sits between an agent and the systems it change
 - **60-second staging airlock.** Outbound email waits in `savepoint_airlock_queue`, pinned by a Redis key with a TTL. After 60s it is released to SMTP (Mailpit).
 - **Deterministic LIFO `revert(runId)`.** This cancels the run's held emails. Then it undoes every applied action in reverse `seq` order: it restores or re-inserts Postgres rows from the snapshots, and it compensates Stripe refunds, either by cancelling them or by re-charging the same amount off-session. It stops at the first failure and resumes when you call it again.
 
+## 3-line quickstart
+
+```bash
+docker compose up -d && npm install && npm run db:seed   # postgres, redis, mailpit, minio (all local, $0)
+npm run dashboard                                        # http://localhost:3000 · side-by-side demo: http://localhost:3000/demo
+```
+
+```ts
+const sp  = await SavepointClient.connectStdio({ command: 'npx', args: ['tsx', 'packages/server/src/mcp/stdio.ts'] });
+const run = sp.run();                                       // 1. one run = one undo unit
+try { await myAgent(run); } catch { await run.revert(); }   // 2-3. unchanged agent; crash → LIFO undo
+```
+
+Works with MCP clients, Anthropic / OpenAI / Gemini tool calls (`anthropicTools`, `openAITools`, `geminiTools` + `run.call(name, args)`)
+and LangGraph. Copy-paste snippets for each are in [packages/sdk/README.md](packages/sdk/README.md).
+Docker is only needed for the backing services; the dashboard and MCP server run on a current Node (uses `process.loadEnvFile`).
+Stop the stack with `docker compose down` (add `-v` to wipe data).
+
 ## Packages
 
 | Package | What |
@@ -29,7 +47,7 @@ npx tsx packages/sdk/examples/quickstart.ts # SDK -> MCP stdio -> engine
 
 ### MCP tools
 
-`savepoint_db_update`, `savepoint_db_delete`, `savepoint_stripe_refund`, `savepoint_send_email`, `savepoint_revert`, `savepoint_get_run`. When the gate blocks a call, the tool returns `isError: true` with `status: "blocked"` and the reason.
+`savepoint_db_update`, `savepoint_db_delete`, `savepoint_stripe_refund`, `savepoint_stripe_authorize_hold`, `savepoint_stripe_capture_holds`, `savepoint_send_email`, S3/GitHub/Slack tools, `savepoint_revert`, `savepoint_get_run`. When the gate blocks a call, the tool returns `isError: true` with `status: "blocked"` and the reason.
 
 ## Known prototype limits
 
@@ -74,3 +92,25 @@ npm run db:migrate && npm run db:seed
 npm test                  # connector integration tests
 npm run drill:5tool       # headless 5-tool chaos drill (or use the dashboard button)
 ```
+
+## Side-by-side disaster demo (Phase 2C)
+
+`npm run dashboard`, then open http://localhost:3000/demo and press **Run Side-by-Side Comparison** (about 45 s, built for a silent launch video).
+The same rogue agent runs twice against disposable sandboxes (`demo_*` tables, `demo/` S3 prefixes, an in-memory Stripe; nothing real is touched):
+
+| | Unprotected | Protected by Savepoint |
+| --- | --- | --- |
+| Step 1: wipe 200 balances | all 200 overwritten | blocked by the gate, retry of 10 is snapshotted |
+| Step 2: $249 charge + duplicate $500 refunds | captured, $1,000 out | auth-hold only, refunds snapshotted |
+| Step 3: delete 25 invoices, email a stranger | deleted, email delivered | blocked, retry vaulted, email held in the airlock |
+| Step 4: crash | permanent damage | `revert(runId)` in well under a second, 100% restored |
+
+## Non-custodial Stripe auth-hold and optional fee
+
+- `savepoint_stripe_authorize_hold` creates a PaymentIntent with `capture_method: 'manual'`: funds are authorized, not moved.
+  Call `savepoint_stripe_capture_holds` once the multi-step run verifies cleanly. `revert(runId)` cancels uncaptured holds with
+  `paymentIntents.cancel` (a captured hold is refunded instead). Savepoint never holds customer money.
+- `SAVEPOINT_CONNECT_FEE_BPS` (default `0`) sets a Stripe Connect `application_fee_amount` on captured holds only.
+  Allowed values: `0`, or `25` to `50` (0.25%-0.50%); it requires `SAVEPOINT_CONNECT_ACCOUNT` (hosted Connect mode).
+  Self-hosted installs leave it at 0. Database, S3, GitHub and Slack/Email rollbacks are always free.
+- Live Stripe test-mode check: `npm run check:stripe-hold -w @savepoint/server`.

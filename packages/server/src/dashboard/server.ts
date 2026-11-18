@@ -9,6 +9,7 @@ import { DrillManager, type DrillMode } from './drill.js';
 import { ListObjectsV2Command, HeadBucketCommand } from '@aws-sdk/client-s3';
 import type { SlackQueueRow } from '../engine/slack.js';
 import { shadowReplay } from './shadow.js';
+import { DisasterDemo } from '../demo/disaster.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = existsSync(resolve(here, 'public')) ? resolve(here, 'public') : resolve(here, '../../src/dashboard/public');
@@ -31,6 +32,9 @@ export interface DashboardOptions {
 export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptions): { server: Server; drills: DrillManager } {
   const pool = sp.infra.pool;
   const drills = new DrillManager(sp);
+  /** ~1.7x => about a 50 s recording; set DEMO_SPEED=1 for a faster ~30 s run. */
+  const demoSpeed = Number(process.env.DEMO_SPEED ?? 1.7);
+  const demo = new DisasterDemo(sp, (m) => console.log(`[demo] ${m}`));
   const allowedHosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`]);
   const mailpitUrl = `http://${sp.config.smtp.host}:8025`;
 
@@ -285,6 +289,16 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(readFileSync(resolve(publicDir, 'index.html')));
       return;
+    }
+    if (method === 'GET' && (path === '/demo' || path === '/demo/')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(readFileSync(resolve(publicDir, 'demo.html')));
+      return;
+    }
+    if (method === 'GET' && path === '/api/demo') return json(res, 200, demo.snapshot());
+    if (method === 'POST' && path === '/api/demo/run') {
+      if (demo.running) throw new HttpError(409, 'A demo run is already in progress', 'demo_running');
+      return json(res, 202, { id: demo.start({ speed: demoSpeed }) });
     }
     if (method === 'GET' && path === '/api/health') return json(res, 200, await health());
     if (method === 'GET' && path === '/api/runs') return json(res, 200, { now: new Date().toISOString(), runs: await listRuns() });

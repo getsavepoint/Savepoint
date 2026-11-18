@@ -4,7 +4,7 @@ import { emailRequestSchema } from '../engine/airlock.js';
 import type { Savepoint } from '../engine/index.js';
 import { RUN_ID_PATTERN } from '../engine/ledger.js';
 import { deleteRequestSchema, updateRequestSchema } from '../engine/postgres.js';
-import { refundRequestSchema } from '../engine/stripe.js';
+import { authorizeHoldSchema, captureHoldsSchema, refundRequestSchema } from '../engine/stripe.js';
 import { s3AclRequestSchema, s3DeleteRequestSchema, s3PutRequestSchema } from '../engine/s3.js';
 import { githubDeleteBranchesSchema, githubUpdateRequestSchema } from '../engine/github.js';
 import { slackArchiveSchema, slackPostSchema } from '../engine/slack.js';
@@ -69,6 +69,28 @@ export function createMcpServer(sp: Savepoint): McpServer {
       annotations: { destructiveHint: true, openWorldHint: true },
     },
     (args) => guard(() => sp.refund(args)),
+  );
+
+  server.registerTool(
+    'savepoint_stripe_authorize_hold',
+    {
+      title: 'Authorize a Stripe payment hold (manual capture, revertable)',
+      description: `Authorize (hold) funds with capture_method "manual": nothing is charged until savepoint_stripe_capture_holds is called after the run verifies cleanly. revert cancels the hold with paymentIntents.cancel. Non-custodial: funds are never held by Savepoint. ${gateNote}`,
+      inputSchema: authorizeHoldSchema,
+      annotations: { destructiveHint: false, openWorldHint: true },
+    },
+    (args) => guard(() => sp.authorizeHold(args)),
+  );
+
+  server.registerTool(
+    'savepoint_stripe_capture_holds',
+    {
+      title: 'Capture the run\'s verified Stripe holds',
+      description: 'Capture every still-held authorization of the run. Call it only after the multi-step run finished cleanly. In hosted Connect mode an optional application fee (SAVEPOINT_CONNECT_FEE_BPS) is taken on capture.',
+      inputSchema: captureHoldsSchema.extend({ runId }),
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    ({ runId }) => guard(() => sp.captureHolds(runId)),
   );
 
   server.registerTool(

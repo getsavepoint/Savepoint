@@ -19,6 +19,20 @@ function int(name: string, fallback: number): number {
   return n;
 }
 
+/**
+ * Optional Stripe Connect application fee, in basis points, taken ONLY on captured Stripe auth-holds.
+ * 0 (default, self-hosted) = no fee. Hosted Connect mode may set 25-50 bps (0.25%-0.50%).
+ * Database, S3, GitHub and Slack/Email rollbacks are always free.
+ */
+export function parseConnectFeeBps(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || (n !== 0 && (n < 25 || n > 50))) {
+    throw new Error(`SAVEPOINT_CONNECT_FEE_BPS must be 0 (no fee) or an integer from 25 to 50 (0.25%-0.50%), got "${raw}"`);
+  }
+  return n;
+}
+
 export const config = {
   databaseUrl: process.env.DATABASE_URL ?? 'postgres://savepoint:savepoint_dev_password@localhost:5432/savepoint_db',
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
@@ -28,6 +42,11 @@ export const config = {
     from: process.env.SMTP_FROM ?? 'savepoint-agent@savepoint.local',
   },
   stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? '',
+  stripeConnect: {
+    feeBps: parseConnectFeeBps(process.env.SAVEPOINT_CONNECT_FEE_BPS),
+    /** Hosted Connect mode: the user's connected account (acct_...); funds settle directly there (non-custodial). */
+    account: process.env.SAVEPOINT_CONNECT_ACCOUNT ?? '',
+  },
   s3: {
     endpoint: process.env.S3_ENDPOINT ?? 'http://localhost:9000',
     region: process.env.S3_REGION ?? 'us-east-1',

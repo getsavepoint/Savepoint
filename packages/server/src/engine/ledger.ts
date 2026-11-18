@@ -1,7 +1,7 @@
 import type pg from 'pg';
 
 export type ActionType =
-  | 'pg.update' | 'pg.delete' | 'stripe.refund'
+  | 'pg.update' | 'pg.delete' | 'stripe.refund' | 'stripe.authorize_hold'
   | 's3.put' | 's3.delete' | 's3.acl'
   | 'github.issue_update' | 'github.pr_update' | 'github.branch_delete'
   | 'slack.post' | 'slack.archive';

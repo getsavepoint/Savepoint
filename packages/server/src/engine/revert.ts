@@ -71,7 +71,7 @@ export async function revertRun(deps: RevertDeps, runId: string): Promise<Revert
       const base = { seq: snap.seq, snapshotId: snap.id, actionType: snap.action_type, target: snap.target };
       try {
         let compensation: Record<string, unknown>;
-        if (snap.action_type === 'stripe.refund') {
+        if (snap.action_type.startsWith('stripe.')) {
           compensation = await deps.stripe.compensate(snap);
           await markReverted(client, snap.id, compensation);
         } else if (snap.action_type.startsWith('s3.')) {

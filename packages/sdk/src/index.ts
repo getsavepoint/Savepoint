@@ -7,7 +7,7 @@ import { StdioClientTransport, type StdioServerParameters } from '@modelcontextp
 // ---------------------------------------------------------------------------
 
 export type ActionType =
-  | 'pg.update' | 'pg.delete' | 'stripe.refund'
+  | 'pg.update' | 'pg.delete' | 'stripe.refund' | 'stripe.authorize_hold'
   | 's3.put' | 's3.delete' | 's3.acl'
   | 'github.issue_update' | 'github.pr_update' | 'github.branch_delete'
   | 'slack.post' | 'slack.archive';
@@ -85,6 +85,31 @@ export interface RefundInput {
   chargeId?: string;
   amountCents?: number;
   reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer';
+}
+export interface HoldInput {
+  amountCents: number;
+  currency?: string;
+  customerId?: string;
+  paymentMethodId?: string;
+  description?: string;
+}
+export interface AppliedHold {
+  status: 'applied' | 'pending';
+  runId: string;
+  seq: number;
+  snapshotId: string;
+  amountCents: number;
+  paymentIntentId?: string;
+  holdStatus?: string;
+  /** Connect application fee that will be taken on capture (0 in self-hosted mode). */
+  feeCents?: number;
+  error?: string;
+}
+export interface CaptureResult {
+  runId: string;
+  captured: { paymentIntentId: string; amountCents: number; feeCents: number }[];
+  skipped: string[];
+  totalFeeCents: number;
 }
 export interface EmailInput {
   to: string | string[];
@@ -176,6 +201,17 @@ export class SavepointClient {
     return this.client.close();
   }
 
+  /** Every Savepoint tool as a plain JSON-Schema description. `runId` is stripped: the run injects it. */
+  async tools(): Promise<SavepointTool[]> {
+    const { tools } = await this.client.listTools();
+    return tools.map((t) => {
+      const schema = JSON.parse(JSON.stringify(t.inputSchema ?? { type: 'object', properties: {} })) as { properties?: Record<string, unknown>; required?: string[] };
+      delete schema.properties?.runId;
+      if (schema.required) schema.required = schema.required.filter((r) => r !== 'runId');
+      return { name: t.name, description: t.description ?? '', inputSchema: schema as Record<string, unknown> };
+    });
+  }
+
   /** @internal */
   async call<T>(name: string, args: Record<string, unknown>): Promise<T> {
     const result = await this.client.callTool({ name, arguments: args });
@@ -192,11 +228,45 @@ export class SavepointClient {
   }
 }
 
+/** A Savepoint tool in provider-neutral form (JSON Schema). */
+export interface SavepointTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/** Anthropic Messages API: `tools: anthropicTools(await sp.tools())`. */
+export const anthropicTools = (tools: SavepointTool[]) =>
+  tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+
+/** OpenAI Chat Completions / Responses function tools: `tools: openAITools(await sp.tools())`. */
+export const openAITools = (tools: SavepointTool[]) =>
+  tools.map((t) => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
+
+/** Gemini (@google/genai): `config: { tools: geminiTools(await sp.tools()) }`. */
+export const geminiTools = (tools: SavepointTool[]) => [
+  { functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description, parametersJsonSchema: t.inputSchema })) },
+];
+
 export class SavepointRun {
   constructor(
     private readonly sp: SavepointClient,
     readonly runId: string,
   ) {}
+
+  /**
+   * Route any model tool call (Anthropic / OpenAI / Gemini / LangGraph) through Savepoint.
+   * Returns the structured result as-is, including `status: 'blocked'`, so the model can adapt.
+   * Gate blocks do NOT throw here: the agent should see them as a normal tool result.
+   */
+  async call(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    try {
+      return await this.sp.call<Record<string, unknown>>(name, { ...args, runId: this.runId });
+    } catch (err) {
+      if (err instanceof SavepointBlockedError) return err.result as unknown as Record<string, unknown>;
+      throw err;
+    }
+  }
 
   updateRows(table: string, where: Where, set: Record<string, Scalar>) {
     return this.sp.call<AppliedMutation | BlockedAction>('savepoint_db_update', { runId: this.runId, table, where, set });
@@ -208,6 +278,16 @@ export class SavepointRun {
 
   refund(input: RefundInput) {
     return this.sp.call<AppliedRefund | BlockedAction>('savepoint_stripe_refund', { runId: this.runId, ...input });
+  }
+
+  /** Authorize (hold) funds with manual capture. Nothing is charged until captureHolds(). */
+  authorizeHold(input: HoldInput) {
+    return this.sp.call<AppliedHold | BlockedAction>('savepoint_stripe_authorize_hold', { runId: this.runId, ...input });
+  }
+
+  /** Capture the run's holds once the multi-step run verified cleanly. */
+  captureHolds() {
+    return this.sp.call<CaptureResult>('savepoint_stripe_capture_holds', { runId: this.runId });
   }
 
   sendEmail(input: EmailInput) {
@@ -249,7 +329,7 @@ export class SavepointRun {
     return { update: this.updateRows.bind(this), delete: this.deleteRows.bind(this) };
   }
   get stripe() {
-    return { refund: this.refund.bind(this) };
+    return { refund: this.refund.bind(this), authorizeHold: this.authorizeHold.bind(this), captureHolds: this.captureHolds.bind(this) };
   }
   get s3() {
     return { put: this.s3PutObject.bind(this), delete: this.s3DeleteObjects.bind(this), setBucketAcl: this.s3SetBucketAcl.bind(this) };

@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { evaluateGate, type GateLimits } from './gate.js';
 import {
   assertRunId,
+  completeAction,
   insertSnapshot,
+  noteActionError,
+  recordAction,
   lockRunXact,
   nextSeq,
   SavepointError,
@@ -30,6 +33,43 @@ export type RefundResult =
   | { status: 'blocked'; runId: string; seq: number; snapshotId: string; amountCents: number; reason: string }
   | { status: 'pending'; runId: string; seq: number; snapshotId: string; amountCents: number; error: string };
 
+export const authorizeHoldSchema = z.object({
+  runId: z.string(),
+  amountCents: z.number().int().positive(),
+  currency: z.string().length(3).default('usd'),
+  customerId: z.string().startsWith('cus_').optional(),
+  paymentMethodId: z.string().startsWith('pm_').optional(),
+  description: z.string().max(500).optional(),
+});
+export type AuthorizeHoldRequest = z.input<typeof authorizeHoldSchema>;
+
+export const captureHoldsSchema = z.object({ runId: z.string() });
+
+export type AuthorizeHoldResult =
+  | { status: 'applied'; runId: string; seq: number; snapshotId: string; amountCents: number; paymentIntentId: string; holdStatus: string; feeCents: number }
+  | { status: 'blocked'; runId: string; seq: number; snapshotId: string; amountCents: number; reason: string }
+  | { status: 'pending'; runId: string; seq: number; snapshotId: string; amountCents: number; error: string };
+
+export interface CaptureHoldsResult {
+  runId: string;
+  captured: { paymentIntentId: string; amountCents: number; feeCents: number }[];
+  skipped: string[];
+  totalFeeCents: number;
+}
+
+/** Application fee (Stripe Connect) for one captured hold: floor(amount * bps / 10_000). */
+export function connectFeeCents(amountCents: number, feeBps: number): number {
+  return feeBps > 0 ? Math.floor((amountCents * feeBps) / 10_000) : 0;
+}
+
+interface HoldState {
+  paymentIntentId?: string;
+  stripeAccount?: string;
+  feeBps: number;
+  captured?: boolean;
+  feeCents?: number;
+}
+
 interface RefundBeforeState {
   charge: Stripe.Charge;
   paymentIntent: Stripe.PaymentIntent | null;
@@ -41,6 +81,8 @@ export interface StripeProxyDeps {
   pool: pg.Pool;
   stripe: Stripe | null;
   limits: GateLimits;
+  /** Optional Connect settings. feeBps 0 / no account = self-hosted, no fee. */
+  connect?: { feeBps: number; account: string };
 }
 
 export class StripeProxy {
@@ -135,12 +177,138 @@ export class StripeProxy {
     }
   }
 
+
+  // ---------------------------------------------------------------------------
+  // Non-custodial auth-hold: capture_method 'manual'. Funds are only authorised
+  // (never moved) until the whole run verifies cleanly and captureHolds() is called.
+  // revert(runId) cancels still-held PaymentIntents with paymentIntents.cancel.
+  // ---------------------------------------------------------------------------
+
+  private get connectOpts(): { feeBps: number; account: string } {
+    const c = this.deps.connect ?? { feeBps: 0, account: '' };
+    if (c.feeBps > 0 && !c.account) {
+      throw new SavepointError('connect_account_required', 'SAVEPOINT_CONNECT_FEE_BPS needs SAVEPOINT_CONNECT_ACCOUNT (hosted Connect mode)');
+    }
+    return c;
+  }
+
+  async authorizeHold(input: AuthorizeHoldRequest): Promise<AuthorizeHoldResult> {
+    const req = authorizeHoldSchema.parse(input);
+    assertRunId(req.runId);
+    const stripe = this.stripe;
+    const connect = this.connectOpts;
+    const requestOpts = connect.account ? { stripeAccount: connect.account } : {};
+    const decision = evaluateGate({ rowsAffected: 1, amountCents: req.amountCents }, this.deps.limits);
+    const state: HoldState = { feeBps: connect.feeBps, ...(connect.account ? { stripeAccount: connect.account } : {}) };
+
+    const snap = await recordAction(this.deps.pool, {
+      runId: req.runId,
+      actionType: 'stripe.authorize_hold',
+      target: `hold:${req.amountCents}${req.currency}`,
+      status: decision.allowed ? 'pending' : 'blocked',
+      request: req,
+      beforeState: { created: false, ...state },
+      rowsAffected: 1,
+      amountCents: req.amountCents,
+      ...(decision.allowed ? {} : { blockReason: decision.reason }),
+    });
+    const base = { runId: req.runId, seq: snap.seq, snapshotId: snap.id, amountCents: req.amountCents };
+    if (!decision.allowed) return { status: 'blocked', ...base, reason: decision.reason };
+
+    try {
+      const pi = await stripe.paymentIntents.create(
+        {
+          amount: req.amountCents,
+          currency: req.currency,
+          capture_method: 'manual',
+          ...(req.customerId ? { customer: req.customerId } : {}),
+          ...(req.paymentMethodId ? { payment_method: req.paymentMethodId, confirm: true, automatic_payment_methods: { enabled: true, allow_redirects: 'never' as const } } : {}),
+          ...(req.description ? { description: req.description } : {}),
+          metadata: { savepoint_run_id: req.runId, savepoint_snapshot_id: snap.id },
+        },
+        { idempotencyKey: `savepoint-hold-${snap.id}`, ...requestOpts },
+      );
+      const after: HoldState = { ...state, paymentIntentId: pi.id };
+      await completeAction(this.deps.pool, snap.id, after);
+      return { status: 'applied', ...base, paymentIntentId: pi.id, holdStatus: pi.status, feeCents: connectFeeCents(req.amountCents, connect.feeBps) };
+    } catch (err) {
+      const message = (err as Error).message;
+      if (err instanceof Stripe.errors.StripeConnectionError || err instanceof Stripe.errors.StripeAPIError) {
+        await noteActionError(this.deps.pool, snap.id, message);
+        return { status: 'pending', ...base, error: message };
+      }
+      await this.deps.pool.query(`UPDATE savepoint_snapshots SET status = 'failed', error = $2 WHERE id = $1`, [snap.id, message]);
+      throw err;
+    }
+  }
+
+  /**
+   * Capture every still-held authorisation of the run (call only after the run verified cleanly).
+   * In hosted Connect mode the application fee (feeBps) is taken on capture; a cancelled hold never pays a fee.
+   */
+  async captureHolds(input: { runId: string }): Promise<CaptureHoldsResult> {
+    const { runId } = captureHoldsSchema.parse(input);
+    assertRunId(runId);
+    const stripe = this.stripe;
+    const { rows } = await this.deps.pool.query<SnapshotRow>(
+      `SELECT * FROM savepoint_snapshots WHERE run_id = $1 AND action_type = 'stripe.authorize_hold' AND status = 'applied' ORDER BY seq`,
+      [runId],
+    );
+    const captured: CaptureHoldsResult['captured'] = [];
+    const skipped: string[] = [];
+    for (const snap of rows) {
+      const st = snap.after_state as HoldState;
+      if (!st.paymentIntentId || st.captured) { if (st.paymentIntentId) skipped.push(st.paymentIntentId); continue; }
+      const opts = st.stripeAccount ? { stripeAccount: st.stripeAccount } : {};
+      const pi = await stripe.paymentIntents.retrieve(st.paymentIntentId, {}, opts);
+      if (pi.status !== 'requires_capture') { skipped.push(pi.id); continue; }
+      const feeCents = connectFeeCents(pi.amount, st.feeBps);
+      const done = await stripe.paymentIntents.capture(
+        pi.id,
+        feeCents > 0 ? { application_fee_amount: feeCents } : {},
+        { idempotencyKey: `savepoint-capture-${snap.id}`, ...opts },
+      );
+      await this.deps.pool.query(`UPDATE savepoint_snapshots SET after_state = $2 WHERE id = $1`, [snap.id, JSON.stringify({ ...st, captured: true, feeCents })]);
+      captured.push({ paymentIntentId: done.id, amountCents: done.amount_received || done.amount, feeCents });
+    }
+    return { runId, captured, skipped, totalFeeCents: captured.reduce((n, c) => n + c.feeCents, 0) };
+  }
+
+  /** Inverse of authorizeHold: cancel an uncaptured hold; if already captured, refund it (and the app fee). */
+  private async compensateHold(snap: SnapshotRow): Promise<Record<string, unknown>> {
+    const stripe = this.stripe;
+    const st = (snap.after_state ?? snap.before_state) as HoldState;
+    const opts = st.stripeAccount ? { stripeAccount: st.stripeAccount } : {};
+    let piId = st.paymentIntentId;
+    if (!piId) {
+      // 'pending': outcome unknown. Look the PaymentIntent up by the snapshot id we stamped on it.
+      const found = await stripe.paymentIntents.search({ query: `metadata['savepoint_snapshot_id']:'${snap.id}'`, limit: 1 }, opts);
+      piId = found.data[0]?.id;
+      if (!piId) return { type: 'noop', note: 'Hold was never created at Stripe' };
+    }
+    const pi = await stripe.paymentIntents.retrieve(piId, {}, opts);
+    if (pi.status === 'canceled') return { type: 'noop', paymentIntentId: pi.id, note: 'Hold already cancelled' };
+    if (pi.status === 'succeeded') {
+      const refund = await stripe.refunds.create(
+        { payment_intent: pi.id, ...(st.stripeAccount ? { refund_application_fee: true } : {}), metadata: { savepoint_run_id: snap.run_id, savepoint_snapshot_id: snap.id } },
+        { idempotencyKey: `savepoint-revert-${snap.id}`, ...opts },
+      );
+      return { type: 'captured_hold_refunded', paymentIntentId: pi.id, refundId: refund.id, amountCents: refund.amount };
+    }
+    const cancelled = await stripe.paymentIntents.cancel(pi.id, { cancellation_reason: 'abandoned' }, opts);
+    return { type: 'hold_cancelled', paymentIntentId: cancelled.id, status: cancelled.status };
+  }
+
   /**
    * Compensating inverse of a refund. Stripe refunds cannot be undone directly,
    * so: cancel it if it is still cancellable; otherwise re-charge the same
    * amount to the same customer + payment method (off-session).
    */
   async compensate(snap: SnapshotRow): Promise<Record<string, unknown>> {
+    return snap.action_type === 'stripe.authorize_hold' ? this.compensateHold(snap) : this.compensateRefund(snap);
+  }
+
+  private async compensateRefund(snap: SnapshotRow): Promise<Record<string, unknown>> {
     const stripe = this.stripe;
     const before = snap.before_state as RefundBeforeState;
     let refund = (snap.after_state as Stripe.Refund | null) ?? null;

@@ -8,7 +8,7 @@ import { SlackProxy, type SlackArchiveRequest, type SlackPostRequest } from './s
 import { type SnapshotRow } from './ledger.js';
 import { PostgresProxy, TableCatalog, type DeleteRequest, type UpdateRequest } from './postgres.js';
 import { revertRun } from './revert.js';
-import { StripeProxy, type RefundRequest } from './stripe.js';
+import { StripeProxy, type AuthorizeHoldRequest, type RefundRequest } from './stripe.js';
 
 export interface SavepointOptions {
   infra?: Infra;
@@ -28,7 +28,7 @@ export function createSavepoint(opts: SavepointOptions = {}) {
     limits: cfg.gate,
     monetaryColumns: cfg.monetaryColumns,
   });
-  const stripe = new StripeProxy({ pool: infra.pool, stripe: infra.stripe, limits: cfg.gate });
+  const stripe = new StripeProxy({ pool: infra.pool, stripe: infra.stripe, limits: cfg.gate, connect: { feeBps: cfg.stripeConnect.feeBps, account: cfg.stripeConnect.account } });
   const airlock = new Airlock({
     pool: infra.pool,
     redis: infra.redis,
@@ -79,6 +79,8 @@ export function createSavepoint(opts: SavepointOptions = {}) {
     updateRows: (req: UpdateRequest) => postgres.update(req),
     deleteRows: (req: DeleteRequest) => postgres.delete(req),
     refund: (req: RefundRequest) => stripe.refund(req),
+    authorizeHold: (req: AuthorizeHoldRequest) => stripe.authorizeHold(req),
+    captureHolds: (runId: string) => stripe.captureHolds({ runId }),
     sendEmail: (req: EmailRequest) => airlock.enqueue(req),
     revert: async (runId: string) => (await init(), revertRun({ pool: infra.pool, airlock, postgres, stripe, s3, github, slack }, runId)),
     async getRun(runId: string) {
