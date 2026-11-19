@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Savepoint Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 :root{
   --bg:#f6f7f9;--panel:#fff;--panel2:#f0f2f5;--text:#14181f;--muted:#5d6675;--line:#dfe3ea;
@@ -69,10 +70,13 @@ pre{background:var(--code);border:1px solid var(--line);border-radius:6px;paddin
 .diff{font-family:ui-monospace,Menlo,monospace;font-size:12px}.diff .from{color:var(--bad);text-decoration:line-through}.diff .to{color:var(--ok)}
 .toast{position:fixed;right:16px;bottom:16px;max-width:420px;padding:10px 14px;border-radius:8px;background:var(--text);color:var(--bg);box-shadow:0 6px 24px rgba(0,0,0,.25);z-index:20}
 a{color:var(--accent)}
+a.pilot{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:5px 9px}a.pilot:hover{color:var(--text);border-color:var(--accent)}
+header img{display:block}
 </style>
 </head>
 <body>
 <header>
+  <img src="/savepoint-logo.svg" alt="Savepoint" width="30" height="30" style="border-radius:7px">
   <h1>Savepoint <span>· Visual Trace &amp; Airlock</span></h1>
   <a href="/demo" style="font-weight:600">Side-by-side disaster demo →</a>
   <div class="pills" id="health"></div>
@@ -80,6 +84,7 @@ a{color:var(--accent)}
   <label class="kv" for="mode">Agent</label>
   <select id="mode"><option value="gemini">Gemini agent (live LLM)</option><option value="scripted">Scripted agent (no LLM)</option></select>
   <button class="primary" id="drillBtn">▶ Run Chaos Drill</button>
+  <a class="pilot" href="{{PILOT_URL}}" target="_blank" rel="noopener">Hosted pilot for startups →</a>
   <button class="primary" id="fiveBtn" title="Postgres + Stripe + S3 + GitHub + Slack/Email, crash on step 6, LIFO revert of all 5">▶ Run 5-Tool Chaos Drill</button>
 </header>
 

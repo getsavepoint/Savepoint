@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Savepoint · Side-by-Side Disaster Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 :root{
   --bg:#07090d;--panel:#10141b;--line:#262d3a;--text:#f5f7fa;--muted:#9aa5b8;
@@ -82,6 +83,7 @@ main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:0;min-height:0}
 .ev.step{font-weight:800;background:#171d28;margin:6px 0;border-left:4px solid #fff;color:#fff}
 .ev.ok{color:var(--green)}.ev.bad{color:var(--red);font-weight:700}.ev.warn{color:var(--amber);font-weight:700}.ev.info{color:var(--text)}
 .ev.crash{font-weight:800;font-size:17px;background:var(--redbg);border-left:4px solid var(--red)}
+a.pilot{font-size:13px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:5px 10px}a.pilot:hover{color:var(--text)}
 @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .err{color:var(--red);padding:8px 28px;font-weight:700}
 @media (max-width:1000px){main{grid-template-columns:1fr}.panel.left{border-right:0;border-bottom:1px solid var(--line)}.grid{grid-template-columns:repeat(2,1fr)}.code{display:none}}
@@ -90,8 +92,9 @@ main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:0;min-height:0}
 </head>
 <body>
 <header>
-  <div class="brand">SAVEPOINT<small>Same rogue AI agent. Same 4 steps. Two outcomes.</small></div>
+  <div class="brand"><img src="/savepoint-logo.svg" alt="Savepoint" width="32" height="32" style="vertical-align:middle;margin-right:10px;border-radius:8px">SAVEPOINT<small>Same rogue AI agent. Same 4 steps. Two outcomes.</small></div>
   <div class="spacer"></div>
+  <a class="pilot" href="{{PILOT_URL}}" target="_blank" rel="noopener">Hosted pilot for startups →</a>
   <a class="back" href="/">← Dashboard</a>
   <div id="timer">0:00</div>
   <button id="run">Run Side-by-Side Comparison</button>
@@ -120,6 +123,7 @@ catch { await run.revert(); }</div></div>
     <div class="feed" id="Rf"></div>
   </section>
 </main>
+<footer style="text-align:center;padding:10px;color:var(--muted);font-size:12px" class="mono">npm install savepoint-sdk &nbsp;·&nbsp; npx savepoint-mcp &nbsp;·&nbsp; github.com/getsavepoint/savepoint</footer>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);

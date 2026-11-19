@@ -1,8 +1,30 @@
 {
-  "name": "@savepoint/server",
+  "name": "savepoint-mcp",
   "version": "0.1.0",
+  "description": "Savepoint MCP proxy: blast-radius gate, staging airlock and deterministic revert for AI agent actions",
   "license": "FSL-1.1-MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getsavepoint/savepoint.git",
+    "directory": "packages/server"
+  },
+  "homepage": "https://github.com/getsavepoint/savepoint#readme",
+  "bugs": {
+    "url": "https://github.com/getsavepoint/savepoint/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "safety",
+    "rollback",
+    "savepoint"
+  ],
+  "bin": {
+    "savepoint-mcp": "dist/mcp/stdio.js"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +35,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/scripts/migrate.ts",
     "db:seed": "tsx src/scripts/seed.ts",
@@ -23,7 +45,9 @@
     "dashboard": "tsx src/dashboard/main.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "drill:5tool": "tsx src/scripts/five-tool-drill.ts",
-    "check:stripe-hold": "tsx src/scripts/stripe-hold.ts"
+    "check:stripe-hold": "tsx src/scripts/stripe-hold.ts",
+    "start": "node dist/dashboard/main.js",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1170.0",
@@ -37,5 +61,15 @@
   "devDependencies": {
     "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "migrations",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
   }
 }

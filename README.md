@@ -1,4 +1,8 @@
+<p align="center"><img src="assets/savepoint-logo.svg" alt="Savepoint" width="120" height="120"></p>
+
 # Savepoint (prototype)
+
+[![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) · https://github.com/getsavepoint/savepoint
 
 A safety proxy for AI agents. It sits between an agent and the systems it changes:
 
@@ -9,12 +13,18 @@ A safety proxy for AI agents. It sits between an agent and the systems it change
 ## 3-line quickstart
 
 ```bash
+npm install savepoint-sdk      # typed client
+npx savepoint-mcp              # the MCP proxy (needs DATABASE_URL / REDIS_URL, see .env.example)
+```
+
+```bash
 docker compose up -d && npm install && npm run db:seed   # postgres, redis, mailpit, minio (all local, $0)
 npm run dashboard                                        # http://localhost:3000 · side-by-side demo: http://localhost:3000/demo
 ```
 
 ```ts
-const sp  = await SavepointClient.connectStdio({ command: 'npx', args: ['tsx', 'packages/server/src/mcp/stdio.ts'] });
+import { SavepointClient } from 'savepoint-sdk';
+const sp  = await SavepointClient.connectStdio({ command: 'npx', args: ['-y', 'savepoint-mcp'] });
 const run = sp.run();                                       // 1. one run = one undo unit
 try { await myAgent(run); } catch { await run.revert(); }   // 2-3. unchanged agent; crash → LIFO undo
 ```
@@ -28,8 +38,8 @@ Stop the stack with `docker compose down` (add `-v` to wipe data).
 
 | Package | What |
 | --- | --- |
-| `packages/server` (`@savepoint/server`) | Engine, migrations and seed, MCP server (stdio), airlock worker |
-| `packages/sdk` (`@savepoint/sdk`) | Typed client (`SavepointClient` / `SavepointRun`) that talks to the MCP server |
+| `packages/server` (`savepoint-mcp`) | Engine, migrations and seed, MCP server (stdio), airlock worker |
+| `packages/sdk` (`savepoint-sdk`) | Typed client (`SavepointClient` / `SavepointRun`) that talks to the MCP server |
 
 ## Quick start
 
@@ -66,13 +76,27 @@ Live run/tool-call trace with Before-State snapshots, the 60-second staging airl
 (Release Early / Kill Switch), Shadow-State Replay, and a one-click Chaos Drill
 (Gemini agent or a deterministic scripted agent). Binds to 127.0.0.1 only.
 
+## Hosted Cloud & Design-Partner Pilot
+
+Startup teams that want Savepoint without running Postgres, Redis and the airlock worker themselves can get a **turnkey hosted airlock with
+custom guardrails** (your blast-radius limits, connector allow-lists, airlock windows). Design-partner pilots are **$500-$1,000/month**.
+Contact: set `SAVEPOINT_PILOT_URL` (a `mailto:` or booking link); the dashboard and /demo header "Hosted pilot" button points there.
+
+Self-deploy a pilot airlock on Railway with the included `Dockerfile` and `railway.json`:
+
+1. Create a Railway project from this repo and add the Postgres and Redis plugins.
+2. Set `DATABASE_URL`, `REDIS_URL`, `DASHBOARD_ALLOWED_HOSTS=<your-app>.up.railway.app` and (optional) `SAVEPOINT_PILOT_URL`. The container binds `0.0.0.0` and reads Railway's `PORT`.
+3. Run `npm run db:migrate -w savepoint-mcp` once (Railway shell). Use test-mode Stripe keys only.
+
+**The dashboard has no built-in authentication.** Put it behind Railway private networking or an auth proxy before exposing it publicly.
+
 ## Licensing (open core)
 
 | Path | License |
 | --- | --- |
 | `packages/sdk` | MIT |
 | `packages/server` | FSL-1.1-MIT (converts to MIT after two years) |
-| `ee/` | Proprietary, all rights reserved |
+| `ee/` | Proprietary, all rights reserved (private, never published to npm) |
 
 ## Connectors (Phase 2B)
 
@@ -113,4 +137,4 @@ The same rogue agent runs twice against disposable sandboxes (`demo_*` tables, `
 - `SAVEPOINT_CONNECT_FEE_BPS` (default `0`) sets a Stripe Connect `application_fee_amount` on captured holds only.
   Allowed values: `0`, or `25` to `50` (0.25%-0.50%); it requires `SAVEPOINT_CONNECT_ACCOUNT` (hosted Connect mode).
   Self-hosted installs leave it at 0. Database, S3, GitHub and Slack/Email rollbacks are always free.
-- Live Stripe test-mode check: `npm run check:stripe-hold -w @savepoint/server`.
+- Live Stripe test-mode check: `npm run check:stripe-hold -w savepoint-mcp`.

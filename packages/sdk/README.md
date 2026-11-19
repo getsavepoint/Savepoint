@@ -1,4 +1,4 @@
-# @savepoint/sdk
+# savepoint-sdk
 
 Typed client for [Savepoint](../../README.md): put a blast-radius gate, pre-flight snapshots, a 60-second airlock and
 a one-call `revert(runId)` between any AI agent and your database, Stripe, S3, GitHub and Slack/Email.
@@ -19,7 +19,8 @@ Everything runs on local sandboxes at $0. Stripe is optional (`STRIPE_SECRET_KEY
 ## The 3-line quickstart
 
 ```ts
-const sp  = await SavepointClient.connectStdio({ command: 'npx', args: ['tsx', 'packages/server/src/mcp/stdio.ts'] });
+import { SavepointClient } from 'savepoint-sdk';
+const sp  = await SavepointClient.connectStdio({ command: 'npx', args: ['-y', 'savepoint-mcp'] });
 const run = sp.run();                       // 1. one run = one undo unit
 try { await myAgent(run); } catch { await run.revert(); }   // 2-3. unchanged agent; crash → LIFO undo
 ```
@@ -30,7 +31,7 @@ Bulk spikes are blocked before they execute (more than 10 rows/objects, more tha
 ### MCP (Claude Desktop, Cursor, any MCP client)
 
 ```json
-{ "mcpServers": { "savepoint": { "command": "npx", "args": ["tsx", "/path/to/savepoint/packages/server/src/mcp/stdio.ts"] } } }
+{ "mcpServers": { "savepoint": { "command": "npx", "args": ["-y", "savepoint-mcp"], "env": { "DATABASE_URL": "postgres://…", "REDIS_URL": "redis://…" } } } }
 ```
 
 Tools: `savepoint_db_update`, `savepoint_db_delete`, `savepoint_stripe_refund`, `savepoint_stripe_authorize_hold`,

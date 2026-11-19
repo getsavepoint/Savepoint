@@ -11,14 +11,14 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "db:migrate": "npm run db:migrate -w @savepoint/server",
-    "db:seed": "npm run db:seed -w @savepoint/server",
-    "dev": "npm run dev -w @savepoint/server",
-    "worker": "npm run worker -w @savepoint/server",
-    "demo": "npm run demo -w @savepoint/server",
-    "dashboard": "npm run dashboard -w @savepoint/server",
-    "test": "npm test -w @savepoint/server",
-    "drill:5tool": "npm run drill:5tool -w @savepoint/server"
+    "db:migrate": "npm run db:migrate -w savepoint-mcp",
+    "db:seed": "npm run db:seed -w savepoint-mcp",
+    "dev": "npm run dev -w savepoint-mcp",
+    "worker": "npm run worker -w savepoint-mcp",
+    "demo": "npm run demo -w savepoint-mcp",
+    "dashboard": "npm run dashboard -w savepoint-mcp",
+    "test": "npm test -w savepoint-mcp",
+    "drill:5tool": "npm run drill:5tool -w savepoint-mcp"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

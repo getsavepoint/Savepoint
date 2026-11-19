@@ -29,6 +29,18 @@ export interface DashboardOptions {
   host?: string;
 }
 
+/** Pilot CTA target. Only http(s)/mailto links are allowed; anything else falls back to the README section. */
+function safePilotUrl(raw: string | undefined): string {
+  const fallback = 'https://github.com/getsavepoint/savepoint#hosted-cloud--design-partner-pilot';
+  if (!raw) return fallback;
+  try {
+    const u = new URL(raw);
+    return ['http:', 'https:', 'mailto:'].includes(u.protocol) ? u.href.replace(/"/g, '%22') : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptions): { server: Server; drills: DrillManager } {
   const pool = sp.infra.pool;
   const drills = new DrillManager(sp);
@@ -36,6 +48,11 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
   const demoSpeed = Number(process.env.DEMO_SPEED ?? 1.7);
   const demo = new DisasterDemo(sp, (m) => console.log(`[demo] ${m}`));
   const allowedHosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`]);
+  // Hosted deploys: comma-separated public hostnames (e.g. my-pilot.up.railway.app). Origins may be https there.
+  const extraHosts = (process.env.DASHBOARD_ALLOWED_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+  for (const h of extraHosts) allowedHosts.add(h);
+  const pilotUrl = safePilotUrl(process.env.SAVEPOINT_PILOT_URL);
+  const renderPage = (file: string) => readFileSync(resolve(publicDir, file), 'utf8').replaceAll('{{PILOT_URL}}', pilotUrl);
   const mailpitUrl = `http://${sp.config.smtp.host}:8025`;
 
   const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -281,18 +298,23 @@ export function createDashboard({ sp, port, host = '127.0.0.1' }: DashboardOptio
     if (!allowedHosts.has(String(req.headers.host))) throw new HttpError(403, 'Forbidden host');
     if (method !== 'GET' && method !== 'HEAD') {
       const origin = req.headers.origin;
-      if (origin && ![...allowedHosts].some((h) => origin === `http://${h}`)) throw new HttpError(403, 'Forbidden origin');
+      if (origin && ![...allowedHosts].some((h) => origin === `http://${h}` || origin === `https://${h}`)) throw new HttpError(403, 'Forbidden origin');
       if (req.headers['x-savepoint-ui'] !== '1') throw new HttpError(403, 'Missing X-Savepoint-UI header');
     }
 
     if (method === 'GET' && (path === '/' || path === '/index.html')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(readFileSync(resolve(publicDir, 'index.html')));
+      res.end(renderPage('index.html'));
       return;
     }
     if (method === 'GET' && (path === '/demo' || path === '/demo/')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(readFileSync(resolve(publicDir, 'demo.html')));
+      res.end(renderPage('demo.html'));
+      return;
+    }
+    if (method === 'GET' && (path === '/savepoint-logo.svg' || path === '/favicon.svg' || path === '/favicon.ico')) {
+      res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=3600' });
+      res.end(readFileSync(resolve(publicDir, path === '/savepoint-logo.svg' ? 'savepoint-logo.svg' : 'favicon.svg')));
       return;
     }
     if (method === 'GET' && path === '/api/demo') return json(res, 200, demo.snapshot());

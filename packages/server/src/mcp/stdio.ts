@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { createSavepoint } from '../engine/index.js';
 import { createMcpServer } from './server.js';

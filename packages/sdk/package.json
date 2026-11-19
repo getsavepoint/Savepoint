@@ -1,8 +1,27 @@
 {
-  "name": "@savepoint/sdk",
+  "name": "savepoint-sdk",
   "version": "0.1.0",
+  "description": "Typed client for Savepoint: blast-radius gate, airlock and one-call revert for AI agent actions",
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getsavepoint/savepoint.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/getsavepoint/savepoint#readme",
+  "bugs": {
+    "url": "https://github.com/getsavepoint/savepoint/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "safety",
+    "rollback",
+    "savepoint"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,11 +33,21 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",
     "@modelcontextprotocol/client": "^2.4.0",
     "zod": "^4.6.7"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
   }
 }
