@@ -1,10 +1,7 @@
-<p align="center"><img src="assets/savepoint-logo.svg" alt="Savepoint" width="120" height="120"></p>
-
-
-
 https://github.com/user-attachments/assets/88c5df8b-a6a8-4367-90e0-110e434b1a25
 
 
+<p align="center"><img src="assets/savepoint-logo.svg" alt="Savepoint" width="120" height="120"></p>
 
 # Savepoint (prototype)
 
