@@ -1,9 +1,8 @@
 https://github.com/user-attachments/assets/88c5df8b-a6a8-4367-90e0-110e434b1a25
 
+# <img src="assets/savepoint-logo.svg" alt="Savepoint" width="34" height="34" align="top"> Savepoint
 
-<p align="center"><img src="assets/savepoint-logo.svg" alt="Savepoint" width="120" height="120"></p>
 
-# Savepoint (prototype)
 
 [![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) · https://github.com/getsavepoint/savepoint
 
