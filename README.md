@@ -108,12 +108,10 @@ All five connectors are gated, snapshotted and revertable (strict LIFO) with `$0
 | Stripe | test mode | charge + PI | >$1,000 |
 | AWS S3 | docker `minio` (`savepoint-minio`) | bytes + metadata copied to a recovery-vault bucket | >10 object deletes, public ACLs |
 | GitHub | built-in offline REST sandbox (:4010); real API when `GITHUB_TOKEN` is set | issue/PR fields, branch head SHAs | >10 items, protected branches |
-| Slack | local inbox sink; live when `SLACK_BOT_TOKEN`/`SLACK_WEBHOOK_URL` set | message + airlock row | @channel/external/webhook airlocked 60s; >10 msgs, archiving blocked |
+| Slack / Email | local Slack sink + docker `mailpit` (`:8025`); live SMTP & `SLACK_BOT_TOKEN`/`SLACK_WEBHOOK_URL` when set | message + airlock row | outbound email & @channel/external/webhook airlocked 60s; >10 msgs, archiving blocked |
 
 ```bash
-docker compose up -d      # postgres, redis, mailpit, minio
-npm run db:migrate && npm run db:seed
-npm test                  # connector integration tests
+npm test                  # connector integration tests (requires docker compose up -d)
 npm run drill:5tool       # headless 5-tool chaos drill (or use the dashboard button)
 ```
 
