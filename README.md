@@ -4,13 +4,13 @@ https://github.com/user-attachments/assets/88c5df8b-a6a8-4367-90e0-110e434b1a25
 
 
 
-[![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) · https://github.com/getsavepoint/savepoint
+[![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) · [**Apply for a Hosted Pilot →**](https://tally.so/r/J1l5dY)
 
-A safety proxy for AI agents. It sits between an agent and the systems it changes:
+Deterministic rollback and blast-radius proxy for AI agents across PostgreSQL, Stripe, AWS S3, GitHub, and Slack/Email:
 
-- **Pre-flight snapshot and blast-radius gate.** Postgres `UPDATE`/`DELETE` and Stripe refunds go through the proxy. A single call that affects more than 10 rows or moves more than $1,000 is blocked. Every call is recorded in `savepoint_snapshots`, blocked ones included, and each applied call stores the exact Before State.
-- **60-second staging airlock.** Outbound email waits in `savepoint_airlock_queue`, pinned by a Redis key with a TTL. After 60s it is released to SMTP (Mailpit).
-- **Deterministic LIFO `revert(runId)`.** This cancels the run's held emails. Then it undoes every applied action in reverse `seq` order: it restores or re-inserts Postgres rows from the snapshots, and it compensates Stripe refunds, either by cancelling them or by re-charging the same amount off-session. It stops at the first failure and resumes when you call it again.
+- **Pre-flight snapshots & blast-radius gates.** Intercepts DB, Stripe, S3, and GitHub writes—saving Before-State snapshots and blocking >10-item mutations, >$1,000 charges/refunds, public S3 ACLs, or protected branches.
+- **60-second staging airlock.** Holds outbound emails and high-blast-radius Slack posts in Redis before releasing to SMTP or Slack.
+- **Deterministic LIFO `revert(runId)`.** Cancels held messages and reverses applied actions in reverse order across all five connectors.
 
 ## 3-line quickstart
 
@@ -43,7 +43,7 @@ Stop the stack with `docker compose down` (add `-v` to wipe data).
 | `packages/server` (`savepoint-mcp`) | Engine, migrations and seed, MCP server (stdio), airlock worker |
 | `packages/sdk` (`savepoint-sdk`) | Typed client (`SavepointClient` / `SavepointRun`) that talks to the MCP server |
 
-## Quick start
+## Local CLI & test drills
 
 ```bash
 docker compose up -d
@@ -61,7 +61,7 @@ npx tsx packages/sdk/examples/quickstart.ts # SDK -> MCP stdio -> engine
 
 `savepoint_db_update`, `savepoint_db_delete`, `savepoint_stripe_refund`, `savepoint_stripe_authorize_hold`, `savepoint_stripe_capture_holds`, `savepoint_send_email`, S3/GitHub/Slack tools, `savepoint_revert`, `savepoint_get_run`. When the gate blocks a call, the tool returns `isError: true` with `status: "blocked"` and the reason.
 
-## Known prototype limits
+## Current v0.1.0 limits
 
 - The Postgres proxy accepts structured `where`/`set` calls, not raw SQL. Target tables need an `id` primary key. Tables starting with `savepoint_` are protected.
 - A Stripe refund can only be compensated if the original PaymentIntent has a customer and a reusable payment method. Otherwise revert stops with `revert_failed` and someone has to fix it by hand. Live keys (`sk_live_`) are refused.
@@ -102,7 +102,7 @@ To self-host `savepoint-mcp` internally using the included `Dockerfile` and `rai
 | `packages/server` | FSL-1.1-MIT (converts to MIT after two years) |
 | `ee/` | Proprietary, all rights reserved (private, never published to npm) |
 
-## Connectors (Phase 2B)
+## Connectors
 
 All five connectors are gated, snapshotted and revertable (strict LIFO) with `$0` local sandboxes:
 
@@ -121,7 +121,7 @@ npm test                  # connector integration tests
 npm run drill:5tool       # headless 5-tool chaos drill (or use the dashboard button)
 ```
 
-## Side-by-side disaster demo (Phase 2C)
+## Side-by-side disaster demo
 
 `npm run dashboard`, then open http://localhost:3000/demo and press **Run Side-by-Side Comparison** (about 45 s, built for a silent launch video).
 The same rogue agent runs twice against disposable sandboxes (`demo_*` tables, `demo/` S3 prefixes, an in-memory Stripe; nothing real is touched):
