@@ -80,17 +80,19 @@ Live run/tool-call trace with Before-State snapshots, the 60-second staging airl
 
 ## Hosted Cloud & Design-Partner Pilot
 
-Startup teams that want Savepoint without running Postgres, Redis and the airlock worker themselves can get a **turnkey hosted airlock with
-custom guardrails** (your blast-radius limits, connector allow-lists, airlock windows). Design-partner pilots are **$500-$1,000/month**.
-Contact: set `https://tally.so/r/J1l5dY` (a `mailto:` or booking link); the dashboard and /demo header "Hosted pilot" button points there.
+Skip self-hosting Postgres, Redis, and the airlock worker. We deploy, secure, and manage a dedicated Savepoint instance wired to your stack—complete with private auth, custom blast-radius limits, connector allow-lists, and airlock hold windows.
 
-Self-deploy a pilot airlock on Railway with the included `Dockerfile` and `railway.json`:
+> [!NOTE]
+> **Design-Partner Pilots ($500–$1,000/mo):** Turnkey hosted airlock and custom guardrails for startup teams shipping agents in production. [**Apply for a Hosted Pilot →**](https://tally.so/r/J1l5dY)
 
+### Self-Hosting on Railway (Internal Use)
+
+To self-host `savepoint-mcp` internally using the included `Dockerfile` and `railway.json`:
 1. Create a Railway project from this repo and add the Postgres and Redis plugins.
-2. Set `DATABASE_URL`, `REDIS_URL`, `DASHBOARD_ALLOWED_HOSTS=<your-app>.up.railway.app` and (optional) `SAVEPOINT_PILOT_URL`. The container binds `0.0.0.0` and reads Railway's `PORT`.
-3. Run `npm run db:migrate -w savepoint-mcp` once (Railway shell). Use test-mode Stripe keys only.
+2. Set `DATABASE_URL`, `REDIS_URL`, `DASHBOARD_ALLOWED_HOSTS=<your-app>.up.railway.app`, and (optional) `SAVEPOINT_PILOT_URL`. The container binds `0.0.0.0` and reads Railway's `PORT`.
+3. Run `npm run db:migrate -w savepoint-mcp` once in the Railway shell (we recommend starting with Stripe Test Mode keys while validating rules).
 
-**The dashboard has no built-in authentication.** Put it behind Railway private networking or an auth proxy before exposing it publicly.
+*Security note: The open-core dashboard ships without built-in login auth—place self-hosted deployments behind Railway private networking or an auth proxy before exposing publicly.*
 
 ## Licensing (open core)
 
