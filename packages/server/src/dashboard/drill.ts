@@ -140,7 +140,6 @@ export class DrillManager {
   }
 
   private parseChaosLine(d: Drill, line: string) {
-    if (line.startsWith('<claude-code-hint')) return;
     const rid = /run id\s*:\s*(\S+)/.exec(line);
     if (rid) this.setRun(d, rid[1]!);
     if (line.startsWith('✖')) { d.crashed = true; d.status = 'crashed'; this.log(d, 'error', line); return; }
