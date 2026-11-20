@@ -53,7 +53,6 @@ npx tsx packages/sdk/examples/quickstart.ts # SDK -> MCP stdio -> engine
 
 - MCP server over stdio: `npm run dev`. It runs the airlock worker in-process unless `SAVEPOINT_RUN_AIRLOCK_WORKER=false`.
 - Standalone airlock worker: `npm run worker`.
-- Mailpit UI: http://localhost:8025
 
 ### MCP tools
 
@@ -74,13 +73,12 @@ npm run dashboard   # http://localhost:3000 (needs `docker compose up -d`)
 
 Live run/tool-call trace with Before-State snapshots, the 60-second staging airlock
 (Release Early / Kill Switch), Shadow-State Replay, and a one-click Chaos Drill
-(Gemini agent or a deterministic scripted agent). Binds to 127.0.0.1 only.
+(Gemini agent or a deterministic scripted agent). Binds to `127.0.0.1` only.
 
 ## Hosted Cloud & Design-Partner Pilot
 
 Skip self-hosting Postgres, Redis, and the airlock worker. We deploy, secure, and manage a dedicated Savepoint instance wired to your stack—complete with private auth, custom blast-radius limits, connector allow-lists, and airlock hold windows.
 
-> [!NOTE]
 > **Design-Partner Pilots ($500–$1,000/mo):** Turnkey hosted airlock and custom guardrails for startup teams shipping agents in production. [**Apply for a Hosted Pilot →**](https://tally.so/r/J1l5dY)
 
 ### Self-Hosting on Railway (Internal Use)
@@ -121,7 +119,7 @@ npm run drill:5tool       # headless 5-tool chaos drill (or use the dashboard bu
 
 ## Side-by-side disaster demo
 
-`npm run dashboard`, then open http://localhost:3000/demo and press **Run Side-by-Side Comparison** (about 45 s, built for a silent launch video).
+Run `npm run dashboard` locally, then open `http://localhost:3000/demo` in your browser and press **Run Side-by-Side Comparison** (about 45 s).
 The same rogue agent runs twice against disposable sandboxes (`demo_*` tables, `demo/` S3 prefixes, an in-memory Stripe; nothing real is touched):
 
 | | Unprotected | Protected by Savepoint |
