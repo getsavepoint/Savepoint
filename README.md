@@ -59,7 +59,7 @@ npx tsx packages/sdk/examples/quickstart.ts # SDK -> MCP stdio -> engine
 
 `savepoint_db_update`, `savepoint_db_delete`, `savepoint_stripe_refund`, `savepoint_stripe_authorize_hold`, `savepoint_stripe_capture_holds`, `savepoint_send_email`, S3/GitHub/Slack tools, `savepoint_revert`, `savepoint_get_run`. When the gate blocks a call, the tool returns `isError: true` with `status: "blocked"` and the reason.
 
-## Current v0.1.0 limits
+## Current v0.1.1 limits
 
 - The Postgres proxy accepts structured `where`/`set` calls, not raw SQL. Target tables need an `id` primary key. Tables starting with `savepoint_` are protected.
 - A Stripe refund can only be compensated if the original PaymentIntent has a customer and a reusable payment method. Otherwise revert stops with `revert_failed` and someone has to fix it by hand. Live keys (`sk_live_`) are refused.

@@ -182,7 +182,7 @@ export class SavepointClient {
   ) {}
 
   static async connect(transport: Transport, opts: SavepointClientOptions = {}): Promise<SavepointClient> {
-    const client = new Client({ name: 'savepoint-sdk', version: '0.1.0' });
+    const client = new Client({ name: 'savepoint-sdk', version: '0.1.1' });
     await client.connect(transport);
     return new SavepointClient(client, { throwOnBlocked: opts.throwOnBlocked ?? true });
   }

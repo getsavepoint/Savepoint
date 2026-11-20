@@ -34,7 +34,7 @@ async function guard(fn: () => Promise<unknown>): Promise<ToolResult> {
 }
 
 export function createMcpServer(sp: Savepoint): McpServer {
-  const server = new McpServer({ name: 'savepoint', version: '0.1.0' }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: 'savepoint', version: '0.1.1' }, { capabilities: { tools: {} } });
   const { maxRows, maxAmountCents } = sp.config.gate;
   const gateNote = `Blocked if it affects more than ${maxRows} rows or moves more than $${maxAmountCents / 100} in one call; the Before State is snapshotted so the run can be reverted.`;
 

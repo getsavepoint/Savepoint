@@ -1,6 +1,6 @@
 {
   "name": "savepoint-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Savepoint MCP proxy: blast-radius gate, staging airlock and deterministic revert for AI agent actions",
   "license": "FSL-1.1-MIT",
   "repository": {
