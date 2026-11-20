@@ -82,7 +82,7 @@ Live run/tool-call trace with Before-State snapshots, the 60-second staging airl
 
 Startup teams that want Savepoint without running Postgres, Redis and the airlock worker themselves can get a **turnkey hosted airlock with
 custom guardrails** (your blast-radius limits, connector allow-lists, airlock windows). Design-partner pilots are **$500-$1,000/month**.
-Contact: set `SAVEPOINT_PILOT_URL` (a `mailto:` or booking link); the dashboard and /demo header "Hosted pilot" button points there.
+Contact: set `https://tally.so/r/J1l5dY` (a `mailto:` or booking link); the dashboard and /demo header "Hosted pilot" button points there.
 
 Self-deploy a pilot airlock on Railway with the included `Dockerfile` and `railway.json`:
 
