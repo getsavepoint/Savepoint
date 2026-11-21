@@ -2,7 +2,7 @@ https://github.com/user-attachments/assets/88c5df8b-a6a8-4367-90e0-110e434b1a25
 
 # <img src="assets/savepoint-logo.svg" alt="Savepoint" width="40" height="40" align="absmiddle">&nbsp;Savepoint
 
-[![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) [![Hosted Pilot](https://img.shields.io/static/v1?label=hosted%20pilot&message=apply%20%E2%86%92&color=10B981)](https://tally.so/r/J1l5dY)
+[![npm: savepoint-sdk](https://img.shields.io/npm/v/savepoint-sdk?label=savepoint-sdk)](https://www.npmjs.com/package/savepoint-sdk) [![npm: savepoint-mcp](https://img.shields.io/npm/v/savepoint-mcp?label=savepoint-mcp)](https://www.npmjs.com/package/savepoint-mcp) [![Hosted Pilot](https://img.shields.io/static/v1?label=hosted%20pilot&message=apply%20%E2%86%92&color=10B981)](https://tally.so/r/J1l5dY) [![M8ven Score](https://m8ven.ai/badge/mcp/getsavepoint-savepoint-m4j269?variant=verified)](https://m8ven.ai/mcp/getsavepoint-savepoint-m4j269?s=readme)
 
 Deterministic rollback and blast-radius proxy for AI agents across PostgreSQL, Stripe, AWS S3, GitHub, and Slack/Email:
 
