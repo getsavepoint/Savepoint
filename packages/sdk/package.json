@@ -1,6 +1,6 @@
 {
   "name": "savepoint-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Typed client for Savepoint: blast-radius gate, airlock and one-call revert for AI agent actions",
   "license": "MIT",
   "repository": {

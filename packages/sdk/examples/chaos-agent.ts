@@ -70,7 +70,7 @@ console.log(`mailpit msgs      : ${await mailpitCount(runId)} matching "${runId}
 // ---------------------------------------------------------------------------
 const serverEntry = fileURLToPath(new URL('../../server/src/mcp/stdio.ts', import.meta.url));
 const tsx = fileURLToPath(new URL('../../../node_modules/.bin/tsx', import.meta.url));
-const mcp = new Client({ name: 'chaos-agent', version: '0.1.1' });
+const mcp = new Client({ name: 'chaos-agent', version: '0.1.2' });
 await mcp.connect(
   new StdioClientTransport({ command: tsx, args: [serverEntry], env: { ...(process.env as Record<string, string>) } }),
 );

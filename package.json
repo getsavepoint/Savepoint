@@ -1,6 +1,6 @@
 {
   "name": "savepoint",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Savepoint: blast-radius gate, staging airlock and deterministic revert for AI agent actions",
   "license": "ISC",

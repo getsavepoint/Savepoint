@@ -1,6 +1,6 @@
 {
   "name": "savepoint-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Savepoint MCP proxy: blast-radius gate, staging airlock and deterministic revert for AI agent actions",
   "license": "FSL-1.1-MIT",
   "repository": {
@@ -43,7 +43,7 @@
     "worker": "tsx src/scripts/airlock-worker.ts",
     "demo": "tsx src/scripts/demo.ts",
     "dashboard": "tsx src/dashboard/main.ts",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "drill:5tool": "tsx src/scripts/five-tool-drill.ts",
     "check:stripe-hold": "tsx src/scripts/stripe-hold.ts",
     "start": "node dist/dashboard/main.js",
@@ -59,6 +59,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1"
   },
